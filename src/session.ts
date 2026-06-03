@@ -1,14 +1,14 @@
-import { Order, OrderDetail, CartItem } from './dinbendon';
+import { Order, OrderDetail, MenuVariation } from './dinbendon';
 
 export type BotStep =
   | 'idle'
   | 'selecting_order'
-  | 'viewing_menu'
+  | 'selecting_category'
   | 'selecting_item'
+  | 'selecting_variation'
   | 'entering_quantity'
   | 'entering_note'
-  | 'reviewing_cart'
-  | 'confirming';
+  | 'entering_buyer_name';
 
 export interface UserSession {
   chatId: number;
@@ -16,15 +16,20 @@ export interface UserSession {
   orders: Order[];
   selectedOrder?: Order;
   orderDetail?: OrderDetail;
-  cart: CartItem[];
-  /** The menu item currently being added */
+  selectedCategoryIdx?: number;
+  pendingProduct?: {
+    productId: string;
+    productName: string;
+    variations: MenuVariation[];
+  };
   pendingItem?: {
     menuItemId: string;
+    productId: string;
     name: string;
     price: number;
     quantity?: number;
+    note?: string;
   };
-  lastMessageId?: number;
 }
 
 export class SessionManager {
@@ -32,23 +37,13 @@ export class SessionManager {
 
   get(chatId: number): UserSession {
     if (!this.sessions.has(chatId)) {
-      this.sessions.set(chatId, {
-        chatId,
-        step: 'idle',
-        orders: [],
-        cart: [],
-      });
+      this.sessions.set(chatId, { chatId, step: 'idle', orders: [] });
     }
     return this.sessions.get(chatId)!;
   }
 
   reset(chatId: number): void {
-    this.sessions.set(chatId, {
-      chatId,
-      step: 'idle',
-      orders: [],
-      cart: [],
-    });
+    this.sessions.set(chatId, { chatId, step: 'idle', orders: [] });
   }
 
   update(chatId: number, updates: Partial<UserSession>): void {

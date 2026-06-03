@@ -6,13 +6,16 @@ import { DinBenDonClient } from './dinbendon';
 import { SessionManager } from './session';
 import {
   formatOrderList,
-  formatMenu,
-  formatCart,
+  formatCategoryList,
+  formatProductList,
+  formatVariationList,
+  formatMyOrder,
   buildOrderKeyboard,
-  buildMenuKeyboard,
-  buildCartKeyboard,
-  buildConfirmKeyboard,
+  buildCategoryKeyboard,
+  buildProductKeyboard,
+  buildVariationKeyboard,
   buildQuantityKeyboard,
+  buildMyOrderKeyboard,
   escapeMarkdown,
 } from './messages';
 
@@ -21,14 +24,8 @@ const BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN ?? '';
 const DBD_USERNAME = process.env.DINBENDON_USERNAME ?? '';
 const DBD_PASSWORD = process.env.DINBENDON_PASSWORD ?? '';
 
-if (!BOT_TOKEN) {
-  console.error('❌ TELEGRAM_BOT_TOKEN is not set!');
-  process.exit(1);
-}
-if (!DBD_USERNAME || !DBD_PASSWORD) {
-  console.error('❌ DINBENDON_USERNAME or DINBENDON_PASSWORD is not set!');
-  process.exit(1);
-}
+if (!BOT_TOKEN) { console.error('❌ TELEGRAM_BOT_TOKEN is not set!'); process.exit(1); }
+if (!DBD_USERNAME || !DBD_PASSWORD) { console.error('❌ DINBENDON_USERNAME or DINBENDON_PASSWORD is not set!'); process.exit(1); }
 
 // ─── Singletons ───────────────────────────────────────────────────────────────
 const bot = new TelegramBot(BOT_TOKEN, { polling: true });
@@ -37,18 +34,14 @@ const sessions = new SessionManager();
 let clientReady = false;
 let loginInProgress = false;
 
-// ─── Helper: safe reply ───────────────────────────────────────────────────────
+// ─── Helpers ──────────────────────────────────────────────────────────────────
 async function reply(
   chatId: number,
   text: string,
   keyboard?: { text: string; callback_data: string }[][]
 ): Promise<TelegramBot.Message> {
-  const options: TelegramBot.SendMessageOptions = {
-    parse_mode: 'MarkdownV2',
-  };
-  if (keyboard) {
-    options.reply_markup = { inline_keyboard: keyboard };
-  }
+  const options: TelegramBot.SendMessageOptions = { parse_mode: 'MarkdownV2' };
+  if (keyboard) options.reply_markup = { inline_keyboard: keyboard };
   return bot.sendMessage(chatId, text, options);
 }
 
@@ -63,9 +56,7 @@ async function editMessage(
     message_id: messageId,
     parse_mode: 'MarkdownV2',
   };
-  if (keyboard) {
-    options.reply_markup = { inline_keyboard: keyboard };
-  }
+  if (keyboard) options.reply_markup = { inline_keyboard: keyboard };
   await bot.editMessageText(text, options);
 }
 
@@ -76,10 +67,8 @@ async function ensureLogin(chatId: number): Promise<boolean> {
     await reply(chatId, '⏳ 正在登入中，請稍候\\.\\.\\.');
     return false;
   }
-
   loginInProgress = true;
   const loadingMsg = await reply(chatId, '🔐 正在登入訂便當系統\\.\\.\\.');
-
   try {
     await dbdClient.login(DBD_USERNAME, DBD_PASSWORD);
     clientReady = true;
@@ -97,15 +86,26 @@ async function ensureLogin(chatId: number): Promise<boolean> {
   }
 }
 
+async function showCategories(chatId: number, messageId: number, userId: number): Promise<void> {
+  const session = sessions.get(userId);
+  const detail = session.orderDetail;
+  if (!detail) {
+    await editMessage(chatId, messageId, '請先使用 /orders 選擇訂單\\。');
+    return;
+  }
+  sessions.update(userId, { step: 'selecting_category', selectedCategoryIdx: undefined, pendingProduct: undefined, pendingItem: undefined });
+  await editMessage(chatId, messageId, formatCategoryList(detail), buildCategoryKeyboard(detail.categories));
+}
+
 // ─── /start ───────────────────────────────────────────────────────────────────
 bot.onText(/\/start/, async (msg) => {
   const chatId = msg.chat.id;
-  sessions.reset(chatId);
+  const userId = msg.from?.id ?? chatId;
+  sessions.reset(userId);
   await reply(
     chatId,
-    `👋 *歡迎使用訂便當 Bot\\!*\n\n使用以下指令開始：\n\n` +
+    `👋 *歡迎使用訂便當 Bot\\!*\n\n` +
       `🍱 /orders \\- 查看開放中的訂單\n` +
-      `🛒 /cart \\- 查看購物車\n` +
       `❓ /help \\- 使用說明`
   );
 });
@@ -116,65 +116,52 @@ bot.onText(/\/help/, async (msg) => {
     msg.chat.id,
     `📖 *使用說明*\n\n` +
       `1\\. 輸入 /orders 查看目前開放的訂單\n` +
-      `2\\. 選擇訂單後，瀏覽菜單並點選品項\n` +
-      `3\\. 輸入數量（1\\~5）\n` +
-      `4\\. 可選擇加備註\n` +
-      `5\\. 確認購物車後送出\n\n` +
-      `💡 同一品項可重複點選累加數量`
+      `2\\. 選擇訂單後，依分類瀏覽菜單\n` +
+      `3\\. 選擇品項 → 選口味 → 選數量\n` +
+      `4\\. 可填寫備註\n` +
+      `5\\. 輸入訂購人姓名後立即送出\n` +
+      `6\\. 點「查看已送出訂單」確認品項`
   );
 });
 
 // ─── /orders ──────────────────────────────────────────────────────────────────
 bot.onText(/\/orders/, async (msg) => {
   const chatId = msg.chat.id;
+  const userId = msg.from?.id ?? chatId;
   const ok = await ensureLogin(chatId);
   if (!ok) return;
 
-  const session = sessions.get(chatId);
   const loadingMsg = await reply(chatId, '⏳ 抓取訂單中\\.\\.\\.');
+  let loadingDeleted = false;
 
   try {
     const orders = await dbdClient.fetchOpenOrders();
-    session.orders = orders;
-    sessions.update(chatId, { step: 'selecting_order', orders });
+    sessions.update(userId, { step: 'selecting_order', orders });
 
     await bot.deleteMessage(chatId, loadingMsg.message_id);
+    loadingDeleted = true;
 
     if (orders.length === 0) {
       await reply(chatId, '😔 目前沒有開放中的訂單\\。');
       return;
     }
-
-    await reply(
-      chatId,
-      formatOrderList(orders),
-      buildOrderKeyboard(orders)
-    );
+    await reply(chatId, formatOrderList(orders), buildOrderKeyboard(orders));
   } catch (err) {
-    const msg2 = err instanceof Error ? err.message : String(err);
-    await bot.editMessageText(`❌ 抓取訂單失敗：${msg2}`, {
-      chat_id: chatId,
-      message_id: loadingMsg.message_id,
-    });
-  }
-});
-
-// ─── /cart ────────────────────────────────────────────────────────────────────
-bot.onText(/\/cart/, async (msg) => {
-  const chatId = msg.chat.id;
-  const session = sessions.get(chatId);
-  const text = formatCart(session.cart);
-  if (session.cart.length > 0) {
-    await reply(chatId, text, buildCartKeyboard());
-  } else {
-    await reply(chatId, text);
+    const errText = `❌ 抓取訂單失敗：${escapeMarkdown(err instanceof Error ? err.message : String(err))}`;
+    try {
+      if (loadingDeleted) await reply(chatId, errText);
+      else await editMessage(chatId, loadingMsg.message_id, errText);
+    } catch {
+      await reply(chatId, errText).catch(() => {});
+    }
   }
 });
 
 // ─── /cancel ──────────────────────────────────────────────────────────────────
 bot.onText(/\/cancel/, async (msg) => {
   const chatId = msg.chat.id;
-  sessions.update(chatId, { step: 'idle', pendingItem: undefined });
+  const userId = msg.from?.id ?? chatId;
+  sessions.update(userId, { step: 'idle', pendingItem: undefined, pendingProduct: undefined });
   await reply(chatId, '✅ 已取消目前操作\\。');
 });
 
@@ -183,11 +170,11 @@ bot.on('callback_query', async (query) => {
   const chatId = query.message?.chat.id;
   const messageId = query.message?.message_id;
   if (!chatId || !messageId) return;
-
   await bot.answerCallbackQuery(query.id);
 
+  const userId = query.from.id;
   const data = query.data ?? '';
-  const session = sessions.get(chatId);
+  const session = sessions.get(userId);
 
   // ── Order selected ──────────────────────────────────────────────────────────
   if (data.startsWith('order:')) {
@@ -195,57 +182,102 @@ bot.on('callback_query', async (query) => {
     const order = session.orders[idx];
     if (!order) return;
 
-    sessions.update(chatId, { step: 'viewing_menu', selectedOrder: order });
-
+    sessions.update(userId, { selectedOrder: order });
     await editMessage(chatId, messageId, `⏳ 載入 *${escapeMarkdown(order.shopName)}* 菜單中\\.\\.\\.`);
 
     try {
       const detail = await dbdClient.fetchOrderDetail(order);
-      sessions.update(chatId, { orderDetail: detail, step: 'selecting_item' });
-
-      await editMessage(
-        chatId,
-        messageId,
-        formatMenu(detail),
-        buildMenuKeyboard(detail.menuItems)
-      );
+      sessions.update(userId, { orderDetail: detail, step: 'selecting_category' });
+      await editMessage(chatId, messageId, formatCategoryList(detail), buildCategoryKeyboard(detail.categories));
     } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      await editMessage(chatId, messageId, `❌ 載入菜單失敗：${escapeMarkdown(msg)}`);
+      await editMessage(chatId, messageId, `❌ 載入菜單失敗：${escapeMarkdown(err instanceof Error ? err.message : String(err))}`);
     }
     return;
   }
 
-  // ── Menu pagination ─────────────────────────────────────────────────────────
-  if (data.startsWith('menu_page:')) {
-    const page = parseInt(data.split(':')[1]);
+  // ── Category selected ───────────────────────────────────────────────────────
+  if (data.startsWith('category:')) {
+    const idx = parseInt(data.split(':')[1]);
     const detail = session.orderDetail;
     if (!detail) return;
+    const category = detail.categories[idx];
+    if (!category) return;
+
+    sessions.update(userId, { step: 'selecting_item', selectedCategoryIdx: idx, pendingProduct: undefined });
     await editMessage(
-      chatId,
-      messageId,
-      formatMenu(detail),
-      buildMenuKeyboard(detail.menuItems, page)
+      chatId, messageId,
+      formatProductList(detail.order.shopName, category.name),
+      buildProductKeyboard(category.products, idx)
     );
     return;
   }
 
-  // ── Item selected ───────────────────────────────────────────────────────────
-  if (data.startsWith('item:')) {
-    const itemId = data.split(':')[1];
-    const menuItem = session.orderDetail?.menuItems.find((m) => m.id === itemId);
-    if (!menuItem) return;
+  // ── Product selected ────────────────────────────────────────────────────────
+  if (data.startsWith('product:')) {
+    const productId = data.slice('product:'.length);
+    const detail = session.orderDetail;
+    if (!detail) return;
 
-    sessions.update(chatId, {
+    let foundProduct: { id: string; name: string; variations: { id: string; name: string | null; price: number }[] } | undefined;
+    for (const cat of detail.categories) {
+      foundProduct = cat.products.find((p) => p.id === productId);
+      if (foundProduct) break;
+    }
+    if (!foundProduct) return;
+
+    if (foundProduct.variations.length === 1 && !foundProduct.variations[0].name) {
+      const v = foundProduct.variations[0];
+      sessions.update(userId, {
+        step: 'entering_quantity',
+        pendingProduct: undefined,
+        pendingItem: { menuItemId: v.id, productId: foundProduct.id, name: foundProduct.name, price: v.price },
+      });
+      await editMessage(
+        chatId, messageId,
+        `🍱 *${escapeMarkdown(foundProduct.name)}* \\- \\$${v.price}\n\n請選擇數量：`,
+        buildQuantityKeyboard()
+      );
+    } else {
+      sessions.update(userId, {
+        step: 'selecting_variation',
+        pendingProduct: { productId: foundProduct.id, productName: foundProduct.name, variations: foundProduct.variations },
+        pendingItem: undefined,
+      });
+      await editMessage(
+        chatId, messageId,
+        formatVariationList(foundProduct.name),
+        buildVariationKeyboard(foundProduct.variations, foundProduct.name)
+      );
+    }
+    return;
+  }
+
+  // ── Variation selected ──────────────────────────────────────────────────────
+  if (data.startsWith('variation:')) {
+    const variationId = data.slice('variation:'.length);
+    const pending = session.pendingProduct;
+    if (!pending) return;
+
+    const variation = pending.variations.find((v) => v.id === variationId);
+    if (!variation) return;
+
+    const displayName = variation.name
+      ? `${escapeMarkdown(pending.productName)} \\(${escapeMarkdown(variation.name)}\\)`
+      : escapeMarkdown(pending.productName);
+
+    sessions.update(userId, {
       step: 'entering_quantity',
-      pendingItem: { menuItemId: itemId, name: menuItem.name, price: menuItem.price },
+      pendingItem: {
+        menuItemId: variationId,
+        productId: pending.productId,
+        name: variation.name ? `${pending.productName} (${variation.name})` : pending.productName,
+        price: variation.price,
+      },
     });
-
     await editMessage(
-      chatId,
-      messageId,
-      `🍱 *${escapeMarkdown(menuItem.name)}* \\- \\$${menuItem.price}\n\n請選擇數量：`,
-      buildQuantityKeyboard(itemId)
+      chatId, messageId,
+      `🍱 *${displayName}* \\- \\$${variation.price}\n\n請選擇數量：`,
+      buildQuantityKeyboard()
     );
     return;
   }
@@ -256,219 +288,183 @@ bot.on('callback_query', async (query) => {
     const pending = session.pendingItem;
     if (!pending) return;
 
-    sessions.update(chatId, {
+    sessions.update(userId, {
       pendingItem: { ...pending, quantity: qty },
       step: 'entering_note',
     });
-
     await editMessage(
-      chatId,
-      messageId,
+      chatId, messageId,
       `✏️ *${escapeMarkdown(pending.name)}* x${qty}\n\n要加備註嗎？直接輸入備註內容，或點選「不加備註」：`,
       [[{ text: '📝 不加備註', callback_data: 'note:skip' }], [{ text: '❌ 取消', callback_data: 'cancel' }]]
     );
     return;
   }
 
-  // ── Note: skip ──────────────────────────────────────────────────────────────
+  // ── Note: skip → ask buyer name ─────────────────────────────────────────────
   if (data === 'note:skip') {
-    await addPendingItemToCart(chatId, messageId, session, undefined);
+    sessions.update(userId, { step: 'entering_buyer_name' });
+    await askBuyerName(chatId, messageId, userId);
     return;
   }
 
-  // ── Cart: view ──────────────────────────────────────────────────────────────
-  if (data === 'cart:view') {
-    const cartText = formatCart(session.cart);
-    const keyboard = session.cart.length > 0 ? buildCartKeyboard() : undefined;
-    await editMessage(chatId, messageId, cartText, keyboard);
-    return;
-  }
-
-  // ── Cart: back to menu ──────────────────────────────────────────────────────
-  if (data === 'cart:back') {
+  // ── View my submitted order ─────────────────────────────────────────────────
+  if (data === 'my:order') {
     const detail = session.orderDetail;
     if (!detail) return;
-    sessions.update(chatId, { step: 'selecting_item' });
-    await editMessage(chatId, messageId, formatMenu(detail), buildMenuKeyboard(detail.menuItems));
+
+    await editMessage(chatId, messageId, '⏳ 載入已送出品項\\.\\.\\.');
+    try {
+      const items = await dbdClient.fetchMyItems(detail.order.id);
+      await editMessage(chatId, messageId, formatMyOrder(detail.order.shopName, items), buildMyOrderKeyboard(items));
+    } catch (err) {
+      await editMessage(chatId, messageId, `❌ 載入失敗：${escapeMarkdown(err instanceof Error ? err.message : String(err))}`,
+        [[{ text: '🔙 回菜單', callback_data: 'back:cat' }]]);
+    }
     return;
   }
 
-  // ── Cart: clear ─────────────────────────────────────────────────────────────
-  if (data === 'cart:clear') {
-    sessions.update(chatId, { cart: [] });
-    await editMessage(chatId, messageId, '🗑️ 購物車已清空\\。');
+  // ── Cancel submitted item ───────────────────────────────────────────────────
+  if (data.startsWith('cancel:item:')) {
+    const detail = session.orderDetail;
+    if (!detail) return;
+
+    const ids = data.slice('cancel:item:'.length).split(',').map(Number).filter(n => !isNaN(n));
+    if (ids.length === 0) return;
+
+    await editMessage(chatId, messageId, '⏳ 取消中\\.\\.\\.');
+    try {
+      await dbdClient.cancelItem(detail.order.id, ids);
+      const items = await dbdClient.fetchMyItems(detail.order.id);
+      await editMessage(chatId, messageId, formatMyOrder(detail.order.shopName, items), buildMyOrderKeyboard(items));
+    } catch (err) {
+      await editMessage(chatId, messageId, `❌ 取消失敗：${escapeMarkdown(err instanceof Error ? err.message : String(err))}`,
+        [[{ text: '🔙 回菜單', callback_data: 'back:cat' }]]);
+    }
     return;
   }
 
-  // ── Cart: confirm (show review) ─────────────────────────────────────────────
-  if (data === 'cart:confirm') {
-    if (session.cart.length === 0) {
-      await editMessage(chatId, messageId, '😅 購物車是空的，請先選擇品項\\。');
+  // ── Back to categories ──────────────────────────────────────────────────────
+  if (data === 'back:cat') {
+    await showCategories(chatId, messageId, userId);
+    return;
+  }
+
+  // ── Back to products ────────────────────────────────────────────────────────
+  if (data === 'back:products') {
+    const detail = session.orderDetail;
+    const catIdx = session.selectedCategoryIdx;
+    if (!detail || catIdx === undefined) {
+      await showCategories(chatId, messageId, userId);
       return;
     }
-    const cartText = formatCart(session.cart);
-    sessions.update(chatId, { step: 'confirming' });
+    const category = detail.categories[catIdx];
+    sessions.update(userId, { step: 'selecting_item', pendingProduct: undefined });
     await editMessage(
-      chatId,
-      messageId,
-      `${cartText}\n\n確定要送出以上訂單嗎？`,
-      buildConfirmKeyboard()
+      chatId, messageId,
+      formatProductList(detail.order.shopName, category.name),
+      buildProductKeyboard(category.products, catIdx)
     );
-    return;
-  }
-
-  // ── Confirm: yes ─────────────────────────────────────────────────────────────
-  if (data === 'confirm:yes') {
-    if (!session.orderDetail || session.cart.length === 0) return;
-
-    await editMessage(chatId, messageId, '⏳ 送出訂單中\\.\\.\\.');
-
-    try {
-      const items = session.cart.map((c) => ({
-        menuItemId: c.name, // use name as identifier for matching
-        quantity: c.quantity,
-        note: c.note,
-      }));
-      const success = await dbdClient.submitOrder(session.orderDetail, items);
-
-      if (success) {
-        sessions.update(chatId, { cart: [], step: 'idle', orderDetail: undefined, selectedOrder: undefined });
-        await editMessage(
-          chatId,
-          messageId,
-          '✅ *訂單已成功送出\\!* 🎉\n\n輸入 /orders 可繼續訂餐\\。'
-        );
-      } else {
-        await editMessage(
-          chatId,
-          messageId,
-          '❌ 送出失敗，請至網頁確認訂單狀態\\。',
-          [[{ text: '🔄 重試', callback_data: 'cart:confirm' }]]
-        );
-      }
-    } catch (err) {
-      const errMsg = err instanceof Error ? err.message : String(err);
-      await editMessage(
-        chatId,
-        messageId,
-        `❌ 送出失敗：${escapeMarkdown(errMsg)}\n\n請至網頁手動確認\\。`
-      );
-    }
-    return;
-  }
-
-  // ── Confirm: no ──────────────────────────────────────────────────────────────
-  if (data === 'confirm:no') {
-    const detail = session.orderDetail;
-    if (!detail) return;
-    sessions.update(chatId, { step: 'selecting_item' });
-    await editMessage(chatId, messageId, formatMenu(detail), buildMenuKeyboard(detail.menuItems));
     return;
   }
 
   // ── Cancel ───────────────────────────────────────────────────────────────────
   if (data === 'cancel') {
-    const detail = session.orderDetail;
-    sessions.update(chatId, { step: detail ? 'selecting_item' : 'idle', pendingItem: undefined });
-    if (detail) {
-      await editMessage(chatId, messageId, formatMenu(detail), buildMenuKeyboard(detail.menuItems));
+    const hasPending = session.pendingItem || session.pendingProduct;
+    sessions.update(userId, { pendingItem: undefined, pendingProduct: undefined });
+    if (hasPending && session.orderDetail) {
+      // cancel mid-flow → back to category list
+      await showCategories(chatId, messageId, userId);
     } else {
-      await editMessage(chatId, messageId, '✅ 已取消\\。');
+      // cancel at category list → exit ordering flow
+      sessions.update(userId, { step: 'idle', orderDetail: undefined, selectedOrder: undefined });
+      await editMessage(chatId, messageId, '✅ 已離開訂餐流程\\。\n\n輸入 /orders 重新開始\\。');
     }
     return;
   }
 });
 
-// ─── Text messages (for note input) ───────────────────────────────────────────
+// ─── Text messages ────────────────────────────────────────────────────────────
 bot.on('message', async (msg) => {
   if (!msg.text || msg.text.startsWith('/')) return;
   const chatId = msg.chat.id;
-  const session = sessions.get(chatId);
+  const userId = msg.from?.id ?? chatId;
+  const session = sessions.get(userId);
 
   if (session.step === 'entering_note' && session.pendingItem) {
     const note = msg.text.trim();
-    await addPendingItemToCartViaText(chatId, session, note);
+    sessions.update(userId, { pendingItem: { ...session.pendingItem, note }, step: 'entering_buyer_name' });
+    await reply(chatId, '✅ 備註已記錄，請輸入*訂購人姓名*：',
+      [[{ text: '❌ 取消', callback_data: 'cancel' }]]);
+    return;
+  }
+
+  if (session.step === 'entering_buyer_name') {
+    await submitItem(chatId, userId, msg.text.trim());
   }
 });
 
-// ─── Helpers ──────────────────────────────────────────────────────────────────
-async function addPendingItemToCart(
-  chatId: number,
-  messageId: number,
-  session: ReturnType<SessionManager['get']>,
-  note: string | undefined
-): Promise<void> {
+// ─── Submit helpers ───────────────────────────────────────────────────────────
+async function askBuyerName(chatId: number, messageId: number, userId: number): Promise<void> {
+  const session = sessions.get(userId);
   const pending = session.pendingItem;
-  if (!pending || pending.quantity === undefined) return;
+  if (!pending) return;
 
-  const cart = [...session.cart];
-  const existing = cart.find(
-    (c) => c.menuItemId === pending.menuItemId && c.note === (note ?? '')
-  );
-
-  if (existing) {
-    existing.quantity += pending.quantity;
-  } else {
-    cart.push({
-      menuItemId: pending.menuItemId,
-      name: pending.name,
-      price: pending.price,
-      quantity: pending.quantity,
-      note,
-    });
-  }
-
-  sessions.update(chatId, { cart, pendingItem: undefined, step: 'selecting_item' });
-
-  const detail = session.orderDetail!;
-  const total = cart.reduce((s, c) => s + c.price * c.quantity, 0);
-  const noteText = note ? ` \\(備註：${escapeMarkdown(note)}\\)` : '';
+  const noteText = pending.note ? `\n備註：${escapeMarkdown(pending.note)}` : '';
   await editMessage(
-    chatId,
-    messageId,
-    `✅ 已加入 *${escapeMarkdown(pending.name)}* x${pending.quantity}${noteText}\n💰 目前合計：\\$${total}\n\n繼續點餐或查看購物車：`,
-    [
-      ...buildMenuKeyboard(detail.menuItems),
-    ]
+    chatId, messageId,
+    `🍱 *${escapeMarkdown(pending.name)}* x${pending.quantity ?? 1}${noteText}\n\n請輸入*訂購人姓名*：`,
+    [[{ text: '❌ 取消', callback_data: 'cancel' }]]
   );
 }
 
-async function addPendingItemToCartViaText(
-  chatId: number,
-  session: ReturnType<SessionManager['get']>,
-  note: string
-): Promise<void> {
+async function submitItem(chatId: number, userId: number, buyerName: string): Promise<void> {
+  const session = sessions.get(userId);
   const pending = session.pendingItem;
-  if (!pending || pending.quantity === undefined) return;
+  if (!pending || !session.orderDetail || pending.quantity === undefined) return;
 
-  const cart = [...session.cart];
-  cart.push({
-    menuItemId: pending.menuItemId,
-    name: pending.name,
-    price: pending.price,
-    quantity: pending.quantity,
-    note,
-  });
+  const loadingMsg = await reply(chatId, `⏳ 以「${escapeMarkdown(buyerName)}」送出\\.\\.\\. `);
 
-  sessions.update(chatId, { cart, pendingItem: undefined, step: 'selecting_item' });
+  try {
+    const success = await dbdClient.submitItem(session.orderDetail, {
+      menuItemId: pending.menuItemId,
+      productId: pending.productId,
+      quantity: pending.quantity,
+      note: pending.note,
+    }, buyerName);
 
-  const detail = session.orderDetail!;
-  const total = cart.reduce((s, c) => s + c.price * c.quantity, 0);
-  await bot.sendMessage(
-    chatId,
-    `✅ 已加入 *${escapeMarkdown(pending.name)}* x${pending.quantity} \\(備註：${escapeMarkdown(note)}\\)\n💰 目前合計：\\$${total}`,
-    {
-      parse_mode: 'MarkdownV2',
-      reply_markup: { inline_keyboard: buildMenuKeyboard(detail.menuItems) },
+    sessions.update(userId, { pendingItem: undefined, pendingProduct: undefined, step: 'selecting_category' });
+
+    if (success) {
+      await bot.editMessageText(
+        `✅ *${escapeMarkdown(pending.name)}* x${pending.quantity} 已送出\\!\n訂購人：${escapeMarkdown(buyerName)}`,
+        {
+          chat_id: chatId,
+          message_id: loadingMsg.message_id,
+          parse_mode: 'MarkdownV2',
+          reply_markup: { inline_keyboard: buildCategoryKeyboard(session.orderDetail!.categories) },
+        }
+      );
+    } else {
+      await bot.editMessageText('❌ 送出失敗，請至網頁確認\\。', {
+        chat_id: chatId,
+        message_id: loadingMsg.message_id,
+        parse_mode: 'MarkdownV2',
+      });
     }
-  );
+  } catch (err) {
+    const errMsg = escapeMarkdown(err instanceof Error ? err.message : String(err));
+    await bot.editMessageText(`❌ 送出失敗：${errMsg}`, {
+      chat_id: chatId,
+      message_id: loadingMsg.message_id,
+      parse_mode: 'MarkdownV2',
+    }).catch(() => reply(chatId, `❌ 送出失敗：${errMsg}`));
+  }
 }
 
 // ─── Start ────────────────────────────────────────────────────────────────────
 console.log('🤖 DinBenDon Telegram Bot starting...');
 console.log(`📡 Connected to: ${BOT_TOKEN.slice(0, 10)}...`);
 
-// Pre-login on startup
 (async () => {
   try {
     console.log('🔐 Pre-logging in to DinBenDon...');
@@ -486,4 +482,8 @@ process.on('SIGINT', () => {
   console.log('\n👋 Bot shutting down...');
   bot.stopPolling();
   process.exit(0);
+});
+
+process.on('unhandledRejection', (reason) => {
+  console.error('⚠️ Unhandled rejection:', reason);
 });
