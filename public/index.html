@@ -1,0 +1,295 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>訂便當 Bot 管理</title>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: #f0f2f5; color: #1a1a2e; }
+
+  /* Layout */
+  .layout { display: flex; min-height: 100vh; }
+  .sidebar { width: 220px; background: #1a1a2e; color: #fff; display: flex; flex-direction: column; position: fixed; top: 0; left: 0; height: 100vh; }
+  .main { margin-left: 220px; padding: 32px; flex: 1; }
+
+  /* Sidebar */
+  .sidebar-logo { padding: 24px 20px 16px; font-size: 1rem; font-weight: 700; border-bottom: 1px solid #2d2d4e; }
+  .sidebar-logo span { color: #54a0ff; }
+  .sidebar-nav { padding: 12px 0; }
+  .nav-btn { display: flex; align-items: center; gap: 10px; width: 100%; padding: 12px 20px; background: none; border: none; color: #aab; cursor: pointer; font-size: 0.9rem; text-align: left; transition: all .15s; }
+  .nav-btn:hover { background: #2d2d4e; color: #fff; }
+  .nav-btn.active { background: #54a0ff20; color: #54a0ff; border-right: 3px solid #54a0ff; }
+  .nav-btn svg { flex-shrink: 0; }
+
+  /* Page header */
+  .page-header { margin-bottom: 24px; }
+  .page-header h1 { font-size: 1.4rem; font-weight: 700; }
+  .page-header p { color: #666; font-size: 0.875rem; margin-top: 4px; }
+
+  /* Card */
+  .card { background: #fff; border-radius: 12px; box-shadow: 0 1px 4px rgba(0,0,0,.08); overflow: hidden; }
+
+  /* Table */
+  table { width: 100%; border-collapse: collapse; }
+  th { padding: 12px 16px; text-align: left; font-size: 0.75rem; font-weight: 600; text-transform: uppercase; letter-spacing: .05em; color: #888; background: #fafafa; border-bottom: 1px solid #eee; }
+  td { padding: 12px 16px; font-size: 0.875rem; border-bottom: 1px solid #f0f0f0; vertical-align: middle; }
+  tr:last-child td { border-bottom: none; }
+  tr:hover td { background: #f9fbff; }
+
+  /* Badges */
+  .badge { display: inline-flex; align-items: center; gap: 4px; padding: 3px 10px; border-radius: 99px; font-size: 0.75rem; font-weight: 600; }
+  .badge-green { background: #e8f5e9; color: #2e7d32; }
+  .badge-gray  { background: #f5f5f5; color: #757575; }
+
+  /* Buttons */
+  .btn { display: inline-flex; align-items: center; gap: 6px; padding: 6px 14px; border-radius: 8px; border: none; font-size: 0.8rem; font-weight: 600; cursor: pointer; transition: all .15s; }
+  .btn-primary { background: #54a0ff; color: #fff; }
+  .btn-primary:hover { background: #2e86de; }
+  .btn-danger  { background: #ff6b6b20; color: #c0392b; }
+  .btn-danger:hover  { background: #ff6b6b40; }
+  .btn:disabled { opacity: .5; cursor: not-allowed; }
+
+  /* Toggle */
+  .toggle-row { display: flex; align-items: center; justify-content: space-between; padding: 20px 24px; }
+  .toggle-row + .toggle-row { border-top: 1px solid #eee; }
+  .toggle-label h3 { font-size: 0.95rem; font-weight: 600; }
+  .toggle-label p  { font-size: 0.82rem; color: #888; margin-top: 2px; }
+  .switch { position: relative; width: 48px; height: 26px; cursor: pointer; }
+  .switch input { opacity: 0; width: 0; height: 0; }
+  .slider { position: absolute; inset: 0; background: #ccc; border-radius: 99px; transition: .3s; }
+  .slider::before { content: ''; position: absolute; width: 20px; height: 20px; left: 3px; top: 3px; background: #fff; border-radius: 50%; transition: .3s; }
+  input:checked + .slider { background: #54a0ff; }
+  input:checked + .slider::before { transform: translateX(22px); }
+
+  /* Toast */
+  #toast { position: fixed; bottom: 24px; right: 24px; padding: 12px 20px; border-radius: 10px; font-size: 0.875rem; font-weight: 600; color: #fff; pointer-events: none; opacity: 0; transition: opacity .3s; z-index: 999; }
+  #toast.show { opacity: 1; }
+  #toast.success { background: #2ecc71; }
+  #toast.error   { background: #e74c3c; }
+
+  /* Misc */
+  .empty { text-align: center; padding: 48px; color: #aaa; }
+  .mono  { font-family: monospace; font-size: 0.8rem; background: #f5f5f5; padding: 2px 6px; border-radius: 4px; }
+  .page { display: none; }
+  .page.active { display: block; }
+  .stats-row { display: flex; gap: 16px; margin-bottom: 24px; }
+  .stat-card { background: #fff; border-radius: 12px; padding: 20px 24px; flex: 1; box-shadow: 0 1px 4px rgba(0,0,0,.08); }
+  .stat-card .val { font-size: 2rem; font-weight: 700; color: #54a0ff; }
+  .stat-card .lbl { font-size: 0.8rem; color: #888; margin-top: 4px; }
+</style>
+</head>
+<body>
+<div class="layout">
+
+<!-- Sidebar -->
+<aside class="sidebar">
+  <div class="sidebar-logo">🍱 <span>訂便當</span> Bot</div>
+  <nav class="sidebar-nav">
+    <button class="nav-btn active" onclick="showPage('users', this)">
+      <svg width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>
+      用戶管理
+    </button>
+    <button class="nav-btn" onclick="showPage('submissions', this)">
+      <svg width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/><polyline points="10 9 9 9 8 9"/></svg>
+      訂單紀錄
+    </button>
+    <button class="nav-btn" onclick="showPage('settings', this)">
+      <svg width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+      系統設定
+    </button>
+  </nav>
+</aside>
+
+<!-- Main -->
+<main class="main">
+
+  <!-- Users Page -->
+  <div id="page-users" class="page active">
+    <div class="page-header">
+      <h1>用戶管理</h1>
+      <p>查看所有曾與 Bot 互動的用戶，管理白名單授權</p>
+    </div>
+    <div class="stats-row">
+      <div class="stat-card"><div class="val" id="stat-total">—</div><div class="lbl">總用戶</div></div>
+      <div class="stat-card"><div class="val" id="stat-auth">—</div><div class="lbl">已授權</div></div>
+      <div class="stat-card"><div class="val" id="stat-pending">—</div><div class="lbl">待授權</div></div>
+    </div>
+    <div class="card">
+      <table>
+        <thead><tr><th>用戶 ID</th><th>名稱</th><th>@帳號</th><th>狀態</th><th>加入時間</th><th>操作</th></tr></thead>
+        <tbody id="users-tbody"><tr><td colspan="6" class="empty">載入中…</td></tr></tbody>
+      </table>
+    </div>
+  </div>
+
+  <!-- Submissions Page -->
+  <div id="page-submissions" class="page">
+    <div class="page-header">
+      <h1>訂單紀錄</h1>
+      <p>最近 200 筆透過 Bot 送出的品項</p>
+    </div>
+    <div class="card">
+      <table>
+        <thead><tr><th>時間</th><th>用戶</th><th>發起人</th><th>品項</th><th>訂購人</th><th>狀態</th><th>訂單 ID</th></tr></thead>
+        <tbody id="subs-tbody"><tr><td colspan="7" class="empty">載入中…</td></tr></tbody>
+      </table>
+    </div>
+  </div>
+
+  <!-- Settings Page -->
+  <div id="page-settings" class="page">
+    <div class="page-header">
+      <h1>系統設定</h1>
+      <p>調整 Bot 的運作模式</p>
+    </div>
+    <div class="card">
+      <div class="toggle-row">
+        <div class="toggle-label">
+          <h3>白名單授權</h3>
+          <p>開啟時僅授權用戶可使用 Bot；關閉時任何人皆可使用</p>
+        </div>
+        <label class="switch">
+          <input type="checkbox" id="whitelist-toggle" onchange="toggleWhitelist(this)">
+          <span class="slider"></span>
+        </label>
+      </div>
+    </div>
+  </div>
+
+</main>
+</div>
+
+<div id="toast"></div>
+
+<script>
+// ── Navigation ──────────────────────────────────────────────────────────────
+function showPage(name, btn) {
+  document.querySelectorAll('.page').forEach(p => p.classList.remove('active'));
+  document.querySelectorAll('.nav-btn').forEach(b => b.classList.remove('active'));
+  document.getElementById('page-' + name).classList.add('active');
+  btn.classList.add('active');
+  if (name === 'users') loadUsers();
+  if (name === 'submissions') loadSubmissions();
+  if (name === 'settings') loadSettings();
+}
+
+// ── Toast ───────────────────────────────────────────────────────────────────
+function toast(msg, type = 'success') {
+  const el = document.getElementById('toast');
+  el.textContent = msg;
+  el.className = 'show ' + type;
+  clearTimeout(el._t);
+  el._t = setTimeout(() => el.classList.remove('show'), 2500);
+}
+
+// ── Users ───────────────────────────────────────────────────────────────────
+async function loadUsers() {
+  const res = await fetch('/api/users');
+  const users = await res.json();
+  const tbody = document.getElementById('users-tbody');
+  const auth = users.filter(u => u.authorized).length;
+  document.getElementById('stat-total').textContent   = users.length;
+  document.getElementById('stat-auth').textContent    = auth;
+  document.getElementById('stat-pending').textContent = users.length - auth;
+
+  if (!users.length) {
+    tbody.innerHTML = '<tr><td colspan="6" class="empty">尚無用戶紀錄</td></tr>';
+    return;
+  }
+  tbody.innerHTML = users.map(u => `
+    <tr>
+      <td><span class="mono">${u.userId}</span></td>
+      <td>${esc(u.firstName || '—')}</td>
+      <td>${u.username ? '@' + esc(u.username) : '—'}</td>
+      <td>${u.authorized
+        ? '<span class="badge badge-green">✓ 已授權</span>'
+        : '<span class="badge badge-gray">未授權</span>'}</td>
+      <td style="color:#888;font-size:.8rem">${fmtDate(u.createdAt)}</td>
+      <td>
+        ${u.authorized
+          ? `<button class="btn btn-danger" onclick="revokeUser(${u.userId}, this)">撤銷</button>`
+          : `<button class="btn btn-primary" onclick="authorizeUser(${u.userId}, this)">授權</button>`}
+      </td>
+    </tr>`).join('');
+}
+
+async function authorizeUser(userId, btn) {
+  btn.disabled = true;
+  await fetch('/api/users/' + userId + '/authorize', { method: 'POST' });
+  toast('已授權 ' + userId);
+  loadUsers();
+}
+
+async function revokeUser(userId, btn) {
+  btn.disabled = true;
+  await fetch('/api/users/' + userId + '/revoke', { method: 'POST' });
+  toast('已撤銷 ' + userId, 'error');
+  loadUsers();
+}
+
+// ── Submissions ──────────────────────────────────────────────────────────────
+async function loadSubmissions() {
+  const res = await fetch('/api/submissions');
+  const subs = await res.json();
+  const tbody = document.getElementById('subs-tbody');
+  if (!subs.length) {
+    tbody.innerHTML = '<tr><td colspan="7" class="empty">尚無訂單紀錄</td></tr>';
+    return;
+  }
+  tbody.innerHTML = subs.map(s => `
+    <tr style="${s.cancelledAt ? 'opacity:.55' : ''}">
+      <td style="color:#888;font-size:.8rem;white-space:nowrap">${fmtDate(s.submittedAt)}</td>
+      <td>
+        <div style="font-weight:600">${esc(s.firstName || '—')}</div>
+        <div style="font-size:.75rem;color:#aaa">${s.username ? '@' + esc(s.username) : ''} <span class="mono">${s.userId}</span></div>
+      </td>
+      <td style="font-size:.85rem">${esc(s.organizer || '—')}</td>
+      <td style="${s.cancelledAt ? 'text-decoration:line-through' : ''}">${esc(s.productName || '—')}</td>
+      <td>${esc(s.buyerName || '—')}</td>
+      <td>${s.cancelledAt
+        ? `<span class="badge badge-gray">已取消<br><span style="font-weight:400;font-size:.7rem">${fmtDate(s.cancelledAt)}</span></span>`
+        : '<span class="badge badge-green">已送出</span>'}</td>
+      <td><span class="mono" style="font-size:.75rem">${s.orderHashId}</span></td>
+    </tr>`).join('');
+}
+
+// ── Settings ──────────────────────────────────────────────────────────────────
+async function loadSettings() {
+  const res = await fetch('/api/settings');
+  const { whitelistEnabled } = await res.json();
+  document.getElementById('whitelist-toggle').checked = whitelistEnabled;
+}
+
+async function toggleWhitelist(checkbox) {
+  checkbox.disabled = true;
+  try {
+    await fetch('/api/settings', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ whitelistEnabled: checkbox.checked }),
+    });
+    toast(checkbox.checked ? '白名單已開啟' : '白名單已關閉');
+  } catch {
+    toast('更新失敗', 'error');
+    checkbox.checked = !checkbox.checked;
+  } finally {
+    checkbox.disabled = false;
+  }
+}
+
+// ── Utils ────────────────────────────────────────────────────────────────────
+function esc(s) {
+  return String(s ?? '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+}
+function fmtDate(s) {
+  if (!s) return '—';
+  // SQLite stores without timezone; treat as local time (Asia/Taipei)
+  return s.replace('T', ' ').slice(0, 16);
+}
+
+// Init
+loadUsers();
+</script>
+</body>
+</html>
