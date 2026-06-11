@@ -1,6 +1,36 @@
 import express from 'express';
 import path from 'path';
+import { exec } from 'child_process';
 import { BotDatabase } from './database';
+
+function getPm2Info(appName: string): Promise<Record<string, unknown> | null> {
+  return new Promise(resolve => {
+    exec('pm2 jlist', (err, stdout) => {
+      if (err || !stdout.trim()) { resolve(null); return; }
+      try {
+        const list = JSON.parse(stdout) as Array<Record<string, unknown>>;
+        const proc = list.find((p: Record<string, unknown>) => p['name'] === appName) ?? null;
+        if (!proc) { resolve(null); return; }
+        const env = proc['pm2_env'] as Record<string, unknown>;
+        const monit = proc['monit'] as Record<string, unknown>;
+        resolve({
+          name: proc['name'],
+          pid: proc['pid'],
+          status: env?.['status'],
+          restartCount: env?.['restart_time'],
+          unstableRestarts: env?.['unstable_restarts'],
+          createdAt: env?.['created_at'],
+          pmUptime: env?.['pm_uptime'],
+          memory: monit?.['memory'],
+          cpu: monit?.['cpu'],
+          maxMemoryRestart: env?.['max_memory_restart'],
+        });
+      } catch {
+        resolve(null);
+      }
+    });
+  });
+}
 
 export function startAdminServer(botDb: BotDatabase, port = 3000): void {
   const app = express();
@@ -44,6 +74,24 @@ export function startAdminServer(botDb: BotDatabase, port = 3000): void {
     }
     botDb.setWhitelistEnabled(whitelistEnabled);
     res.json({ ok: true });
+  });
+
+  // ─── Status ───────────────────────────────────────────────────────────────
+  app.get('/api/status', async (_req, res) => {
+    const mem = process.memoryUsage();
+    const [pm2] = await Promise.all([getPm2Info('dinbendon-bot')]);
+    res.json({
+      uptime: process.uptime(),
+      nodeVersion: process.version,
+      memory: {
+        rss: mem.rss,
+        heapUsed: mem.heapUsed,
+        heapTotal: mem.heapTotal,
+        external: mem.external,
+      },
+      sqlite: botDb.getStatusInfo(),
+      pm2,
+    });
   });
 
   app.listen(port, '127.0.0.1', () => {

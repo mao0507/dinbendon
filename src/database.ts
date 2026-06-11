@@ -27,8 +27,10 @@ export interface SubmissionRecord {
 export class BotDatabase {
   private db: Database.Database;
   private readonly defaultWhitelistEnabled: boolean;
+  private readonly dbPath: string;
 
   constructor(dbPath = path.join(process.cwd(), 'data', 'bot.db'), defaultWhitelistEnabled = true) {
+    this.dbPath = dbPath;
     fs.mkdirSync(path.dirname(dbPath), { recursive: true });
     this.db = new Database(dbPath);
     this.db.pragma('journal_mode = WAL');
@@ -212,5 +214,15 @@ export class BotDatabase {
       INSERT INTO settings(key, value) VALUES('whitelist_enabled', ?)
       ON CONFLICT(key) DO UPDATE SET value = excluded.value
     `).run(enabled ? '1' : '0');
+  }
+
+  // ─── Status ──────────────────────────────────────────────────────────────────
+
+  getStatusInfo(): { fileSizeBytes: number; userCount: number; submissionCount: number } {
+    const userCount = (this.db.prepare('SELECT COUNT(*) as c FROM users').get() as { c: number }).c;
+    const submissionCount = (this.db.prepare('SELECT COUNT(*) as c FROM submissions').get() as { c: number }).c;
+    let fileSizeBytes = 0;
+    try { fileSizeBytes = fs.statSync(this.dbPath).size; } catch {}
+    return { fileSizeBytes, userCount, submissionCount };
   }
 }
