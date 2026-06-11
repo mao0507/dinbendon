@@ -51,6 +51,38 @@ pnpm build
 pnpm start
 ```
 
+**PM2（正式部署，推薦）：**
+
+第一次啟動：
+```bash
+pnpm build
+pm2 start ecosystem.config.js
+```
+
+更新程式碼後重啟：
+```bash
+pnpm build && pm2 restart dinbendon-bot
+```
+
+開機自動啟動（設定一次）：
+```bash
+pm2 startup   # 照輸出的指令執行
+pm2 save
+```
+
+常用 PM2 指令：
+
+| 指令 | 說明 |
+|------|------|
+| `pm2 status` | 查看所有 app 狀態 |
+| `pm2 logs dinbendon-bot` | 即時 tail log |
+| `pm2 logs dinbendon-bot --lines 50` | 看最後 50 行 |
+| `pm2 stop dinbendon-bot` | 暫停（保留設定） |
+| `pm2 restart dinbendon-bot` | 重啟 |
+| `pm2 delete dinbendon-bot` | 完全移除 |
+
+Log 位置：`logs/out.log`（stdout）、`logs/error.log`（stderr）
+
 ## 使用指令
 
 | 指令 | 說明 |
