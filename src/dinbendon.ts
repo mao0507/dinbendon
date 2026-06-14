@@ -58,6 +58,9 @@ export class DinBenDonClient {
   private client: AxiosInstance;
   private token: string | null = null;
   private loggedIn = false;
+  private storedUsername: string | null = null;
+  private storedPassword: string | null = null;
+  private reloginInProgress = false;
 
   constructor() {
     this.client = axios.create({
@@ -71,11 +74,52 @@ export class DinBenDonClient {
       return config;
     });
 
-    this.client.interceptors.response.use((response) => {
-      const newToken = response.headers['x-dbd-new-token'];
-      if (typeof newToken === 'string' && newToken !== '') this.token = newToken;
-      return response;
-    });
+    this.client.interceptors.response.use(
+      (response) => {
+        const newToken = response.headers['x-dbd-new-token'];
+        if (typeof newToken === 'string' && newToken !== '') this.token = newToken;
+        return response;
+      },
+      async (error: unknown) => {
+        const axiosErr = error as { response?: { status?: number }; config?: { _retried?: boolean } & import('axios').InternalAxiosRequestConfig };
+        const status = axiosErr.response?.status;
+        const config = axiosErr.config;
+
+        if (status === 401 && config && !config._retried && !this.reloginInProgress && this.storedUsername && this.storedPassword) {
+          config._retried = true;
+          try {
+            await this.relogin();
+            if (this.token) config.headers.set('Authorization', `Bearer ${this.token}`);
+            return this.client(config);
+          } catch (reloginErr) {
+            return Promise.reject(reloginErr);
+          }
+        }
+        return Promise.reject(error);
+      },
+    );
+  }
+
+  private async relogin(): Promise<void> {
+    if (!this.storedUsername || !this.storedPassword) throw new Error('No stored credentials for re-login');
+    this.reloginInProgress = true;
+    console.log('[DinBenDon] Token expired, re-logging in...');
+    try {
+      this.token = null;
+      this.loggedIn = false;
+      const resp = await this.client.post('/auth/login', {
+        username: this.storedUsername,
+        password: this.storedPassword,
+        rememberMe: false,
+        continueUrl: null,
+      });
+      const body = resp.data as { data: unknown; error: string | null };
+      if (body.error) throw new Error(body.error);
+      this.loggedIn = true;
+      console.log('[DinBenDon] Re-login successful!');
+    } finally {
+      this.reloginInProgress = false;
+    }
   }
 
   async login(username: string, password: string): Promise<void> {
@@ -90,6 +134,8 @@ export class DinBenDonClient {
     const body = resp.data as { data: unknown; error: string | null };
     if (body.error) throw new Error(body.error);
 
+    this.storedUsername = username;
+    this.storedPassword = password;
     this.loggedIn = true;
     console.log('[DinBenDon] Login successful!');
   }
