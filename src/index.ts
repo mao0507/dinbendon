@@ -296,6 +296,18 @@ bot.onText(/\/users/, async (msg) => {
   await reply(chatId, `👥 *用戶清單*\n\n${lines.join('\n')}`)
 })
 
+// ─── /version ─────────────────────────────────────────────────────────────────
+bot.onText(/\/version/, async (msg) => {
+  const chatId = msg.chat.id
+  const { execSync } = require('child_process')
+  try {
+    const hash = execSync('git rev-parse --short=7 HEAD', { cwd: __dirname }).toString().trim()
+    await reply(chatId, `🔖 版本：\`${hash}\``)
+  } catch {
+    await reply(chatId, '⚠️ 無法取得版本資訊。')
+  }
+})
+
 // ─── Callback queries ─────────────────────────────────────────────────────────
 bot.on('callback_query', async (query) => {
   const chatId = query.message?.chat.id
