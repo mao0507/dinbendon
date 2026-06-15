@@ -91,6 +91,7 @@ Log 位置：`logs/out.log`（stdout）、`logs/error.log`（stderr）
 | `/orders` | 查看開放中的訂單 |
 | `/cancel` | 取消目前操作 |
 | `/help` | 查看使用說明 |
+| `/version` | 查看目前部署的 git commit hash |
 
 **管理員指令（需設定 `ADMIN_USER_ID`）：**
 

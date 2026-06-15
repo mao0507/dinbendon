@@ -154,16 +154,17 @@ bot.onText(/\/start/, async (msg) => {
   if (!authorized) {
     await reply(
       chatId,
-      `👋 *歡迎使用訂便當 Bot\\!*\n\n🔒 您尚未獲得授權，請聯絡管理員。\n您的 ID：\`${userId}\``,
+      `👋 *歡迎使用子恩早餐店 Bot\\!*\n\n🔒 您尚未獲得授權，請聯絡管理員。\n您的 ID：\`${userId}\``,
     )
     return
   }
 
   await reply(
     chatId,
-    `👋 *歡迎使用訂便當 Bot\\!*\n\n` +
+    `👋 *歡迎使用子恩早餐店 Bot\\!*\n\n` +
       `🍱 /orders \\- 查看開放中的訂單\n` +
-      `❓ /help \\- 使用說明`,
+      `❓ /help \\- 使用說明\n` +
+      `🔖 /version \\- 查看版本資訊`,
   )
 })
 
@@ -301,7 +302,9 @@ bot.onText(/\/version/, async (msg) => {
   const chatId = msg.chat.id
   const { execSync } = require('child_process')
   try {
-    const hash = execSync('git rev-parse --short=7 HEAD', { cwd: __dirname }).toString().trim()
+    const hash = execSync('git rev-parse --short=7 HEAD', { cwd: __dirname })
+      .toString()
+      .trim()
     await reply(chatId, `🔖 版本：\`${hash}\``)
   } catch {
     await reply(chatId, '⚠️ 無法取得版本資訊。')
