@@ -311,6 +311,70 @@ bot.onText(/\/version/, async (msg) => {
   }
 })
 
+// ─── Admin: /bk ───────────────────────────────────────────────────────────────
+// 一鍵下單固定餐點，訂購人皆為 bk
+const BK_BUYER = 'bk'
+const BK_ITEMS = [
+  { product: '厚切里肌蛋', variation: '吐司', note: '' },
+  { product: '益菌豆漿', variation: 'L冰', note: '一分糖多冰' },
+]
+
+bot.onText(/\/bk/, async (msg) => {
+  const chatId = msg.chat.id
+  const userId = msg.from?.id ?? chatId
+  if (!isAdmin(userId)) {
+    await reply(chatId, '🚫 此指令僅限管理員使用。')
+    return
+  }
+  if (!(await ensureLogin(chatId))) return
+
+  try {
+    const orders = await dbdClient.fetchOpenOrders()
+    if (orders.length === 0) {
+      await reply(chatId, '目前沒有進行中的訂單。')
+      return
+    }
+
+    // 下在最近的訂單
+    const detail = await dbdClient.fetchOrderDetail(orders[0])
+
+    const results: string[] = []
+    for (const it of BK_ITEMS) {
+      const match = findMenuItem(detail, it.product, it.variation)
+      if (!match) {
+        results.push(`⚠️ 找不到 ${escapeMarkdown(it.product)} \\(${escapeMarkdown(it.variation)}\\)`)
+        continue
+      }
+      const ok = await dbdClient.submitItem(
+        detail,
+        { menuItemId: match.variationId, productId: match.productId, quantity: 1, note: it.note },
+        BK_BUYER,
+      )
+      results.push(`${ok ? '✅' : '❌'} ${escapeMarkdown(it.product)} \\(${escapeMarkdown(it.variation)}\\)`)
+    }
+
+    await reply(chatId, `🍱 *bk 下單結果*\n\n${results.join('\n')}`)
+  } catch (err) {
+    const m = err instanceof Error ? err.message : String(err)
+    await reply(chatId, `❌ 下單失敗：${escapeMarkdown(m)}`)
+  }
+})
+
+// 依名稱（子字串）找出產品 + 規格
+function findMenuItem(
+  detail: import('./dinbendon').OrderDetail,
+  productName: string,
+  variationName: string,
+): { productId: string; variationId: string } | null {
+  for (const cat of detail.categories) {
+    const product = cat.products.find((p) => p.name.includes(productName))
+    if (!product) continue
+    const variation = product.variations.find((v) => (v.name ?? '').includes(variationName))
+    if (variation) return { productId: product.id, variationId: variation.id }
+  }
+  return null
+}
+
 // ─── Callback queries ─────────────────────────────────────────────────────────
 bot.on('callback_query', async (query) => {
   const chatId = query.message?.chat.id
