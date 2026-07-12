@@ -25,9 +25,11 @@ import {
 const BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN ?? ''
 const DBD_USERNAME = process.env.DINBENDON_USERNAME ?? ''
 const DBD_PASSWORD = process.env.DINBENDON_PASSWORD ?? ''
-const ADMIN_USER_ID = process.env.ADMIN_USER_ID
-  ? parseInt(process.env.ADMIN_USER_ID)
-  : null
+// 支援單一或逗號分隔多個管理員 ID
+const ADMIN_USER_IDS: number[] = (process.env.ADMIN_USER_ID ?? '')
+  .split(',')
+  .map((s) => parseInt(s.trim(), 10))
+  .filter((n) => !Number.isNaN(n))
 const ADMIN_PORT = process.env.ADMIN_PORT
   ? parseInt(process.env.ADMIN_PORT)
   : 3000
@@ -77,7 +79,8 @@ async function editMessage(
 }
 
 function isAdmin(userId: number): boolean {
-  return ADMIN_USER_ID !== null && userId === ADMIN_USER_ID
+  // 管理員 = 環境變數 ∪ 後台設定
+  return ADMIN_USER_IDS.includes(userId) || botDb.getAdminUserIds().includes(userId)
 }
 
 async function ensureAuth(chatId: number, userId: number): Promise<boolean> {

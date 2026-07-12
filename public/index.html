@@ -240,6 +240,15 @@
         </label>
       </div>
     </div>
+    <div class="card">
+      <div class="toggle-label">
+        <h3>管理員清單</h3>
+        <p>可使用管理員指令的 Telegram 使用者 ID，逗號分隔。環境變數設定的管理員不會顯示於此，但同樣有效。</p>
+      </div>
+      <input type="text" id="admin-ids-input" placeholder="例如：123456,789012"
+        style="width:100%;margin-top:12px;padding:8px;box-sizing:border-box">
+      <button class="nav-btn" style="margin-top:12px" onclick="saveAdminIds()">儲存</button>
+    </div>
   </div>
 
 </main>
@@ -343,8 +352,25 @@ async function loadSubmissions() {
 // ── Settings ──────────────────────────────────────────────────────────────────
 async function loadSettings() {
   const res = await fetch('/api/settings');
-  const { whitelistEnabled } = await res.json();
+  const { whitelistEnabled, adminUserIds } = await res.json();
   document.getElementById('whitelist-toggle').checked = whitelistEnabled;
+  document.getElementById('admin-ids-input').value = (adminUserIds || []).join(',');
+}
+
+async function saveAdminIds() {
+  const raw = document.getElementById('admin-ids-input').value;
+  const ids = raw.split(',').map(s => parseInt(s.trim(), 10)).filter(n => !Number.isNaN(n));
+  try {
+    const res = await fetch('/api/settings', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ adminUserIds: ids }),
+    });
+    if (!res.ok) throw new Error();
+    toast('管理員清單已更新');
+  } catch {
+    toast('更新失敗', 'error');
+  }
 }
 
 async function toggleWhitelist(checkbox) {

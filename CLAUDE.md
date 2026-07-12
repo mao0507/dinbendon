@@ -84,7 +84,7 @@ DINBENDON_PASSWORD=
 Optional vars:
 
 ```
-ADMIN_USER_ID=        # Telegram user ID granted admin commands
+ADMIN_USER_ID=        # Telegram user ID(s) granted admin commands; comma-separated for multiple. 後台也可設定 (settings.admin_user_ids)，兩者聯集生效
 ADMIN_PORT=3000       # Express admin UI port (default 3000)
 WHITELIST_ENABLED=true  # set to "false" to allow all users
 ```

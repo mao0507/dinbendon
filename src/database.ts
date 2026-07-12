@@ -216,6 +216,25 @@ export class BotDatabase {
     `).run(enabled ? '1' : '0');
   }
 
+  getAdminUserIds(): number[] {
+    const row = this.db.prepare(
+      "SELECT value FROM settings WHERE key = 'admin_user_ids'"
+    ).get() as { value: string } | undefined;
+    if (!row) return [];
+    return row.value
+      .split(',')
+      .map((s) => parseInt(s.trim(), 10))
+      .filter((n) => !Number.isNaN(n));
+  }
+
+  setAdminUserIds(ids: number[]): void {
+    const value = [...new Set(ids)].join(',');
+    this.db.prepare(`
+      INSERT INTO settings(key, value) VALUES('admin_user_ids', ?)
+      ON CONFLICT(key) DO UPDATE SET value = excluded.value
+    `).run(value);
+  }
+
   // ─── Status ──────────────────────────────────────────────────────────────────
 
   getStatusInfo(): { fileSizeBytes: number; userCount: number; submissionCount: number } {

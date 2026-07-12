@@ -63,16 +63,31 @@ export function startAdminServer(botDb: BotDatabase, port = 3000): void {
 
   // ─── Settings ─────────────────────────────────────────────────────────────
   app.get('/api/settings', (_req, res) => {
-    res.json({ whitelistEnabled: botDb.isWhitelistEnabled() });
+    res.json({
+      whitelistEnabled: botDb.isWhitelistEnabled(),
+      adminUserIds: botDb.getAdminUserIds(),
+    });
   });
 
   app.post('/api/settings', (req, res) => {
-    const { whitelistEnabled } = req.body as { whitelistEnabled?: unknown };
-    if (typeof whitelistEnabled !== 'boolean') {
-      res.status(400).json({ error: 'whitelistEnabled must be boolean' });
-      return;
+    const { whitelistEnabled, adminUserIds } = req.body as {
+      whitelistEnabled?: unknown;
+      adminUserIds?: unknown;
+    };
+    if (whitelistEnabled !== undefined) {
+      if (typeof whitelistEnabled !== 'boolean') {
+        res.status(400).json({ error: 'whitelistEnabled must be boolean' });
+        return;
+      }
+      botDb.setWhitelistEnabled(whitelistEnabled);
     }
-    botDb.setWhitelistEnabled(whitelistEnabled);
+    if (adminUserIds !== undefined) {
+      if (!Array.isArray(adminUserIds) || !adminUserIds.every((n) => Number.isInteger(n))) {
+        res.status(400).json({ error: 'adminUserIds must be an integer array' });
+        return;
+      }
+      botDb.setAdminUserIds(adminUserIds as number[]);
+    }
     res.json({ ok: true });
   });
 
