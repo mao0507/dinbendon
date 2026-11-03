@@ -6,19 +6,24 @@ import { DinBenDonClient } from './dinbendon'
 import { BotDatabase } from './database'
 import { startAdminServer } from './admin'
 import { Submissions } from './submissions'
+import { Access } from './access'
 import { OrderFlow, Ui, Keyboard, escapeMarkdown } from './order-flow'
 
 // ─── Config ───────────────────────────────────────────────────────────────────
 const BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN ?? ''
 const DBD_USERNAME = process.env.DINBENDON_USERNAME ?? ''
 const DBD_PASSWORD = process.env.DINBENDON_PASSWORD ?? ''
-const ADMIN_USER_ID = process.env.ADMIN_USER_ID
-  ? parseInt(process.env.ADMIN_USER_ID)
-  : null
+const RAW_ADMIN_USER_ID = process.env.ADMIN_USER_ID?.trim()
 const ADMIN_PORT = process.env.ADMIN_PORT
   ? parseInt(process.env.ADMIN_PORT)
   : 3000
 const WHITELIST_DEFAULT = process.env.WHITELIST_ENABLED !== 'false'
+
+if (RAW_ADMIN_USER_ID && !/^-?\d+$/.test(RAW_ADMIN_USER_ID)) {
+  console.error('❌ ADMIN_USER_ID must be a number!')
+  process.exit(1)
+}
+const ADMIN_USER_ID = RAW_ADMIN_USER_ID ? parseInt(RAW_ADMIN_USER_ID) : null
 
 if (!BOT_TOKEN) {
   console.error('❌ TELEGRAM_BOT_TOKEN is not set!')
@@ -36,6 +41,7 @@ const dbdClient = new DinBenDonClient({
   password: DBD_PASSWORD,
 })
 const botDb = new BotDatabase(undefined, WHITELIST_DEFAULT)
+const access = new Access({ db: botDb, adminUserId: ADMIN_USER_ID })
 const flow = new OrderFlow({
   client: dbdClient,
   submissions: new Submissions({ client: dbdClient, db: botDb }),
@@ -67,18 +73,18 @@ async function editMessage(
   await bot.editMessageText(text, options)
 }
 
-function isAdmin(userId: number): boolean {
-  return ADMIN_USER_ID !== null && userId === ADMIN_USER_ID
-}
-
 async function ensureAuth(chatId: number, userId: number): Promise<boolean> {
-  if (!botDb.isWhitelistEnabled()) return true
-  if (isAdmin(userId)) return true
-  if (botDb.isAuthorized(userId)) return true
+  if (access.isAllowed(userId)) return true
   await reply(
     chatId,
     `🔒 您尚未獲得授權，請聯絡管理員。\n您的 ID：\`${userId}\``,
   )
+  return false
+}
+
+async function requireAdmin(chatId: number, userId: number): Promise<boolean> {
+  if (access.isAdmin(userId)) return true
+  await reply(chatId, '🚫 此指令僅限管理員使用。')
   return false
 }
 
@@ -115,9 +121,7 @@ bot.onText(/\/start/, async (msg) => {
   botDb.upsertUser(userId, msg.from?.username, msg.from?.first_name)
   await runFlow(userId, { kind: 'command', name: 'reset' }, makeUi(chatId))
 
-  const authorized =
-    !botDb.isWhitelistEnabled() || isAdmin(userId) || botDb.isAuthorized(userId)
-  if (!authorized) {
+  if (!access.isAllowed(userId)) {
     await reply(
       chatId,
       `👋 *歡迎使用子恩早餐店 Bot\\!*\n\n🔒 您尚未獲得授權，請聯絡管理員。\n您的 ID：\`${userId}\``,
@@ -174,10 +178,7 @@ bot.onText(/\/cancel/, async (msg) => {
 bot.onText(/\/add_user(?:\s+(-?\d+))?/, async (msg, match) => {
   const chatId = msg.chat.id
   const userId = msg.from?.id ?? chatId
-  if (!isAdmin(userId)) {
-    await reply(chatId, '🚫 此指令僅限管理員使用。')
-    return
-  }
+  if (!(await requireAdmin(chatId, userId))) return
   const targetId = match?.[1] ? parseInt(match[1]) : null
   if (!targetId) {
     await reply(chatId, '用法：`/add_user <userId>`')
@@ -191,10 +192,7 @@ bot.onText(/\/add_user(?:\s+(-?\d+))?/, async (msg, match) => {
 bot.onText(/\/revoke_user(?:\s+(-?\d+))?/, async (msg, match) => {
   const chatId = msg.chat.id
   const userId = msg.from?.id ?? chatId
-  if (!isAdmin(userId)) {
-    await reply(chatId, '🚫 此指令僅限管理員使用。')
-    return
-  }
+  if (!(await requireAdmin(chatId, userId))) return
   const targetId = match?.[1] ? parseInt(match[1]) : null
   if (!targetId) {
     await reply(chatId, '用法：`/revoke_user <userId>`')
@@ -211,10 +209,7 @@ bot.onText(/\/revoke_user(?:\s+(-?\d+))?/, async (msg, match) => {
 bot.onText(/\/users/, async (msg) => {
   const chatId = msg.chat.id
   const userId = msg.from?.id ?? chatId
-  if (!isAdmin(userId)) {
-    await reply(chatId, '🚫 此指令僅限管理員使用。')
-    return
-  }
+  if (!(await requireAdmin(chatId, userId))) return
   const users = botDb.listUsers()
   if (users.length === 0) {
     await reply(chatId, '目前沒有已記錄的用戶。')
