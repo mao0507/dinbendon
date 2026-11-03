@@ -117,7 +117,7 @@ SQLite DB is written to `data/bot.db` (created on first run).
 ### Data flow
 
 1. `index.ts` owns one `DinBenDonClient`, one `BotDatabase`, one `Submissions({ client, db })`, and one `OrderFlow({ client, submissions })`.
-2. `index.ts` handles auth (whitelist), login, `/help`, `/version`, admin commands. 點餐相關輸入一律轉成 `FlowInput`（`callback` / `text` / `command: orders|cancel|reset`）交給 `OrderFlow.handle(userId, input, ui)`。
+2. `index.ts` handles auth (whitelist), `/help`, `/version`, admin commands. 點餐相關輸入一律轉成 `FlowInput`（`callback` / `text` / `command: orders|cancel|reset`）交給 `OrderFlow.handle(userId, input, ui)`。
 3. `ui` 是 Telegram adapter（`makeUi`）：`ui.show(text, keyboard)` 第一次呼叫對 callback 是編輯按鈕所在訊息、對 command/text 是新送一則，之後都編輯同一則。
 4. `DinBenDonClient` holds a single bearer token — login is global, not per-user.
 5. 送單走 `Submissions.place`（不丟例外，失敗回 `{ ok:false, reason }`）：
@@ -129,9 +129,12 @@ SQLite DB is written to `data/bot.db` (created on first run).
 ### DinBenDon client (`dinbendon.ts`)
 
 - Target: JSON REST API (`API_BASE` in `dinbendon.ts`), not HTML scraping. Auth = `Bearer` token from `POST /auth/login`.
+- `new DinBenDonClient({ username, password })`：帳密在建構時傳入；**延遲登入**，每個 `fetch*`／`submitItem`／`cancelItem` 開頭 `await this.ready()`，並發呼叫共用同一次登入（single-flight）。`index.ts` 啟動時只做暖機 `ready().catch(...)`。
 - Axios request interceptor attaches token; response interceptor adopts rotated token from `x-dbd-new-token` header.
-- On 401, interceptor calls `relogin()` with stored credentials and retries the request once (`_retried` flag, `reloginInProgress` guard).
+- On 401：所有並發的 401 共用同一次重登（`reauth()`），完成後各自重試原請求一次（`_retried`）；若請求送出後 token 已被換新則直接重試不再登入。
+- 登入失敗丟 `LoginError`：`message` 是給使用者看的固定文字（請稍後再試／聯絡管理員），網站原始錯誤在 `detail` 並寫 log。失敗後 30 秒（`cooldownMs`）內不再打登入端點，直接丟同一個 `LoginError`。
 - Login is global (one token for the whole bot), not per Telegram user.
+- 測試：`src/dinbendon.test.ts` 以 axios `adapter` 選項注入假 HTTP（`DinBenDonClientOptions.adapter`）。
 - Endpoints: `/order/progress`, `/order/:id/get-add-item`, `/order/:id/add-item`, `/order/:hash/product-group-for-buyer`, `/order/:hash/cancel-item`.
 
 ### Session state machine (`BotStep`, `order-flow/session.ts`)
