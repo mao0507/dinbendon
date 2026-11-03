@@ -31,7 +31,7 @@ pnpm start            # run compiled dist/index.js
 pnpm test             # node:test via ts-node (src/**/*.test.ts)
 ```
 
-測試只有 `src/order-flow/order-flow.test.ts`：用假 `DinBenDonClient`、記錄呼叫的 `Ui`、`:memory:` SQLite 跑完整點餐流程。
+測試：`src/order-flow/order-flow.test.ts`（假 `DinBenDonClient`、記錄呼叫的 `Ui`、`:memory:` SQLite 跑完整點餐流程、送出失敗重試、防重送）與 `src/submissions.test.ts`（place / mine / cancel）。
 
 > `better-sqlite3` 的 native binding 若缺（`Could not locate the bindings file`），在該套件目錄執行 `prebuild-install` 即可。
 
@@ -101,6 +101,7 @@ Single-process bot with SQLite persistence. No queue.
 ```
 src/
 ├── index.ts       — Telegram adapter: registers handlers, auth/login, owns singletons
+├── submissions.ts — Submissions: place / mine / cancel 品項，維護 order_item_id 歸屬（依賴 client + db）
 ├── dinbendon.ts   — axios client for dinbendon.net JSON API (bearer token, auto re-login on 401)
 ├── order-flow/    — 點餐流程 module（唯一對外入口 index.ts）
 │   ├── index.ts       — OrderFlow.handle(userId, input, ui)、送單邏輯
@@ -115,11 +116,15 @@ SQLite DB is written to `data/bot.db` (created on first run).
 
 ### Data flow
 
-1. `index.ts` owns one `DinBenDonClient`, one `BotDatabase`, and one `OrderFlow({ client, db })`.
+1. `index.ts` owns one `DinBenDonClient`, one `BotDatabase`, one `Submissions({ client, db })`, and one `OrderFlow({ client, submissions })`.
 2. `index.ts` handles auth (whitelist), login, `/help`, `/version`, admin commands. 點餐相關輸入一律轉成 `FlowInput`（`callback` / `text` / `command: orders|cancel|reset`）交給 `OrderFlow.handle(userId, input, ui)`。
 3. `ui` 是 Telegram adapter（`makeUi`）：`ui.show(text, keyboard)` 第一次呼叫對 callback 是編輯按鈕所在訊息、對 command/text 是新送一則，之後都編輯同一則。
 4. `DinBenDonClient` holds a single bearer token — login is global, not per-user.
-5. On successful `submitItem`, `OrderFlow` diffs `fetchMyItems` before/after to record new `order_item_id`s in `BotDatabase`.
+5. 送單走 `Submissions.place`（不丟例外，失敗回 `{ ok:false, reason }`）：
+   - 送出前先快照 `fetchMyItems`，快照失敗就中止；
+   - 送出後 diff 新增 id，且只記 `buyerName` 等於輸入姓名的品項（姓名對不上時退回全部新增 id 並 `console.warn`）；
+   - `cancel` 只取消 DB 中屬於該使用者的 id。
+6. 送出期間 session step 為 `submitting`（防重送）；失敗時回 `entering_buyer_name` 並保留 `pendingItem`，可直接重打姓名。
 
 ### DinBenDon client (`dinbendon.ts`)
 
