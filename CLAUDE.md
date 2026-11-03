@@ -87,7 +87,7 @@ DINBENDON_PASSWORD=
 Optional vars:
 
 ```
-ADMIN_USER_ID=        # Telegram user ID granted admin commands
+ADMIN_USER_ID=        # Telegram user ID granted admin commands（必須是整數，格式錯誤時啟動即退出）
 ADMIN_PORT=3000       # Express admin UI port (default 3000)
 WHITELIST_ENABLED=true  # set to "false" to allow all users
 ```
@@ -101,6 +101,7 @@ Single-process bot with SQLite persistence. No queue.
 ```
 src/
 ├── index.ts       — Telegram adapter: registers handlers, auth/login, owns singletons
+├── access.ts      — Access: isAdmin / isAllowed（白名單開關 + 管理員 bypass + 授權狀態）
 ├── submissions.ts — Submissions: place / mine / cancel 品項，維護 order_item_id 歸屬（依賴 client + db）
 ├── dinbendon.ts   — axios client for dinbendon.net JSON API (bearer token, auto re-login on 401)
 ├── order-flow/    — 點餐流程 module（唯一對外入口 index.ts）
@@ -117,7 +118,7 @@ SQLite DB is written to `data/bot.db` (created on first run).
 ### Data flow
 
 1. `index.ts` owns one `DinBenDonClient`, one `BotDatabase`, one `Submissions({ client, db })`, and one `OrderFlow({ client, submissions })`.
-2. `index.ts` handles auth (whitelist), `/help`, `/version`, admin commands. 點餐相關輸入一律轉成 `FlowInput`（`callback` / `text` / `command: orders|cancel|reset`）交給 `OrderFlow.handle(userId, input, ui)`。
+2. `index.ts` 透過 `Access` 判斷放行（`ensureAuth`、`requireAdmin`），並處理 `/help`, `/version`, admin commands. 點餐相關輸入一律轉成 `FlowInput`（`callback` / `text` / `command: orders|cancel|reset`）交給 `OrderFlow.handle(userId, input, ui)`。
 3. `ui` 是 Telegram adapter（`makeUi`）：`ui.show(text, keyboard)` 第一次呼叫對 callback 是編輯按鈕所在訊息、對 command/text 是新送一則，之後都編輯同一則。
 4. `DinBenDonClient` holds a single bearer token — login is global, not per-user.
 5. 送單走 `Submissions.place`（不丟例外，失敗回 `{ ok:false, reason }`）：
@@ -176,4 +177,4 @@ All text sent to Telegram uses `parse_mode: 'MarkdownV2'`. Every user-facing str
 
 ### Whitelist
 
-When `whitelist_enabled = 1` in the `settings` table (default), only users with `authorized = 1` in `users` table can use the bot. `ADMIN_USER_ID` always bypasses the whitelist.
+規則集中在 `src/access.ts` 的 `Access.isAllowed`：whitelist 關閉 → 放行；`ADMIN_USER_ID` → 放行；否則看 `users.authorized`。When `whitelist_enabled = 1` in the `settings` table (default), only users with `authorized = 1` in `users` table can use the bot. `ADMIN_USER_ID` always bypasses the whitelist.授權／撤銷／列表仍在 `BotDatabase`，Express 後台與 Telegram 管理指令直接呼叫它。
