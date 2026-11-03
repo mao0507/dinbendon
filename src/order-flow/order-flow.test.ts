@@ -2,6 +2,7 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { OrderFlow, Ui, FlowInput, escapeMarkdown } from './index'
 import { BotDatabase } from '../database'
+import { Submissions } from '../submissions'
 import { DinBenDonClient, Order, OrderDetail, MyOrderItem } from '../dinbendon'
 
 const order: Order = {
@@ -29,12 +30,15 @@ const detail: OrderDetail = {
 function setup() {
   const submitted: unknown[] = []
   let items: MyOrderItem[] = []
+  const ctl = { accept: true, gate: Promise.resolve() as Promise<void> }
   const client = {
     fetchOpenOrders: async () => [order],
     fetchOrderDetail: async () => detail,
     fetchMyItems: async () => items,
     cancelItem: async () => {},
     submitItem: async (_d: OrderDetail, item: unknown, buyer: string) => {
+      await ctl.gate
+      if (!ctl.accept) return false
       submitted.push({ item, buyer })
       items = [
         {
@@ -51,7 +55,7 @@ function setup() {
     },
   } as unknown as DinBenDonClient
   const db = new BotDatabase(':memory:')
-  const flow = new OrderFlow({ client, db })
+  const flow = new OrderFlow({ client, submissions: new Submissions({ client, db }) })
 
   const shown: string[] = []
   let lastKeyboard: { text: string; callback_data: string }[][] | undefined
@@ -63,7 +67,11 @@ function setup() {
   }
   const send = (input: FlowInput) => flow.handle(1, input, ui)
   const press = (data: string) => send({ kind: 'callback', data })
-  return { send, press, shown, db, submitted, keyboard: () => lastKeyboard }
+  const toBuyerName = async () => {
+    await send({ kind: 'command', name: 'orders' })
+    for (const d of ['order:0', 'category:0', 'product:10', 'qty:2', 'note:skip']) await press(d)
+  }
+  return { send, press, shown, db, submitted, ctl, toBuyerName, keyboard: () => lastKeyboard }
 }
 
 test('完整點餐流程：/orders → 送出 → 記錄 → 取消', async () => {
@@ -115,4 +123,34 @@ test('無效或過期的 callback 不改變狀態也不輸出', async () => {
   await t.press('garbage')
   await t.press('order:9')
   assert.deepEqual(t.shown, [])
+})
+
+test('送出被拒絕時保留待送品項，可重打姓名重試', async () => {
+  const t = setup()
+  await t.toBuyerName()
+
+  t.ctl.accept = false
+  await t.send({ kind: 'text', text: '阿明' })
+  assert.match(t.shown.at(-1)!, /送出失敗/)
+  assert.match(t.shown.at(-1)!, /重新輸入/)
+  assert.equal(t.submitted.length, 0)
+
+  t.ctl.accept = true
+  await t.send({ kind: 'text', text: '阿明' })
+  assert.match(t.shown.at(-1)!, /已送出/)
+  assert.equal(t.submitted.length, 1)
+})
+
+test('送出進行中再傳姓名不會重送', async () => {
+  const t = setup()
+  await t.toBuyerName()
+
+  let release!: () => void
+  t.ctl.gate = new Promise<void>((r) => (release = r))
+  const first = t.send({ kind: 'text', text: '阿明' })
+  await t.send({ kind: 'text', text: '阿明' }) // 送出中，被忽略
+  release()
+  await first
+
+  assert.equal(t.submitted.length, 1)
 })
