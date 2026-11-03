@@ -204,7 +204,7 @@ bot.onText(/\/add_user(?:\s+(-?\d+))?/, async (msg, match) => {
   }
   const targetId = match?.[1] ? parseInt(match[1]) : null
   if (!targetId) {
-    await reply(chatId, '用法：`/adduser <userId>`')
+    await reply(chatId, '用法：`/add_user <userId>`')
     return
   }
   botDb.authorizeUser(targetId)
