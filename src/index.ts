@@ -5,6 +5,7 @@ import TelegramBot from 'node-telegram-bot-api'
 import { DinBenDonClient } from './dinbendon'
 import { BotDatabase } from './database'
 import { startAdminServer } from './admin'
+import { Submissions } from './submissions'
 import { OrderFlow, Ui, Keyboard, escapeMarkdown } from './order-flow'
 
 // ─── Config ───────────────────────────────────────────────────────────────────
@@ -32,7 +33,10 @@ if (!DBD_USERNAME || !DBD_PASSWORD) {
 const bot = new TelegramBot(BOT_TOKEN, { polling: true })
 const dbdClient = new DinBenDonClient()
 const botDb = new BotDatabase(undefined, WHITELIST_DEFAULT)
-const flow = new OrderFlow({ client: dbdClient, db: botDb })
+const flow = new OrderFlow({
+  client: dbdClient,
+  submissions: new Submissions({ client: dbdClient, db: botDb }),
+})
 let clientReady = false
 let loginInProgress = false
 

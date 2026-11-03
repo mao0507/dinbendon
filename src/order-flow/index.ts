@@ -1,5 +1,5 @@
 import { DinBenDonClient, OrderDetail } from '../dinbendon'
-import { BotDatabase } from '../database'
+import { Submissions } from '../submissions'
 import { SessionManager } from './session'
 import { cb, decodeCallback } from './callbacks'
 import {
@@ -36,7 +36,7 @@ export type FlowInput =
 
 export interface OrderFlowDeps {
   client: DinBenDonClient
-  db: BotDatabase
+  submissions: Submissions
 }
 
 const errText = (err: unknown): string =>
@@ -262,9 +262,21 @@ export class OrderFlow {
         if (!detail || c.ids.length === 0) return
         await ui.show('⏳ 取消中\\.\\.\\.')
         try {
-          await this.deps.client.cancelItem(detail.order.id, c.ids)
-          this.deps.db.recordCancellation(c.ids)
-          await this.showMyOrder(userId, detail, ui)
+          const result = await this.deps.submissions.cancel(
+            userId,
+            detail.order.id,
+            c.ids,
+          )
+          if (!result.ok) {
+            await ui.show(`❌ 取消失敗：${escapeMarkdown(result.reason)}`, [
+              [{ text: '🔙 回菜單', callback_data: cb.backCat }],
+            ])
+            return
+          }
+          await ui.show(
+            formatMyOrder(detail.order.shopName, result.all),
+            buildMyOrderKeyboard(result.mine),
+          )
         } catch (err) {
           await ui.show(`❌ 取消失敗：${errText(err)}`, [
             [{ text: '🔙 回菜單', callback_data: cb.backCat }],
@@ -360,76 +372,65 @@ export class OrderFlow {
     detail: OrderDetail,
     ui: Ui,
   ): Promise<void> {
-    const allItems = await this.deps.client.fetchMyItems(detail.order.id)
-    const myIds = this.deps.db.getMyItemIds(userId, detail.order.id)
-    const myItems = allItems.filter((item) =>
-      item.orderItemIds.some((id) => myIds.has(id)),
+    const { all, mine } = await this.deps.submissions.mine(
+      userId,
+      detail.order.id,
     )
     await ui.show(
-      formatMyOrder(detail.order.shopName, allItems),
-      buildMyOrderKeyboard(myItems),
+      formatMyOrder(detail.order.shopName, all),
+      buildMyOrderKeyboard(mine),
     )
   }
 
-  // 送單邏輯原樣搬入，之後由「Submissions」module 取代。
   private async submit(userId: number, buyerName: string, ui: Ui): Promise<void> {
-    const { client, db } = this.deps
     const session = this.sessions.get(userId)
     const pending = session.pendingItem
     const detail = session.orderDetail
     if (!pending || !detail || pending.quantity === undefined) return
 
-    const orderHashId = detail.order.id
+    // 先切到 submitting：期間再傳的文字不會符合任何分支，避免重送
+    this.sessions.update(userId, { step: 'submitting' })
     await ui.show(`⏳ 以「${escapeMarkdown(buyerName)}」送出\\.\\.\\. `)
 
-    // 送出前先快照，才能找出這次新建的 orderItemIds
-    const beforeItems = await client.fetchMyItems(orderHashId).catch(() => [])
-    const beforeIds = new Set(beforeItems.flatMap((i) => i.orderItemIds))
-
-    try {
-      const success = await client.submitItem(
+    // place 約定不丟例外；DB 寫入等意外仍要能解除 submitting，不能卡死使用者
+    const result = await this.deps.submissions
+      .place(
+        userId,
         detail,
         {
           menuItemId: pending.menuItemId,
           productId: pending.productId,
+          name: pending.name,
           quantity: pending.quantity,
           note: pending.note,
         },
         buyerName,
       )
+      .catch((err: unknown) => ({
+        ok: false as const,
+        reason: err instanceof Error ? err.message : String(err),
+      }))
 
-      this.sessions.update(userId, {
-        pendingItem: undefined,
-        pendingProduct: undefined,
-        step: 'selecting_category',
-      })
-
-      if (!success) {
-        await ui.show('❌ 送出失敗，請至網頁確認。')
-        return
-      }
-
-      const afterItems = await client.fetchMyItems(orderHashId).catch(() => [])
-      const newIds = afterItems
-        .flatMap((i) => i.orderItemIds)
-        .filter((id) => !beforeIds.has(id))
-      if (newIds.length > 0) {
-        db.recordSubmission(
-          userId,
-          orderHashId,
-          newIds,
-          pending.name,
-          buyerName,
-          detail.order.organizer,
-        )
-      }
-
+    if (!result.ok) {
+      // 保留待送品項，使用者可重打姓名重試
+      this.sessions.update(userId, { step: 'entering_buyer_name' })
       await ui.show(
-        `✅ *${escapeMarkdown(pending.name)}* x${pending.quantity} 已送出\\!\n訂購人：${escapeMarkdown(buyerName)}`,
-        buildCategoryKeyboard(detail.categories),
+        `❌ 送出失敗：${escapeMarkdown(result.reason)}\n\n可重新輸入*訂購人姓名*再試一次：`,
+        [[{ text: '❌ 取消', callback_data: cb.cancel }]],
       )
-    } catch (err) {
-      await ui.show(`❌ 送出失敗：${errText(err)}`)
+      return
     }
+
+    this.sessions.update(userId, {
+      pendingItem: undefined,
+      pendingProduct: undefined,
+      step: 'selecting_category',
+    })
+    const unrecorded =
+      result.recorded.length === 0 ? '\n⚠️ 無法記錄此品項，請至網頁確認' : ''
+    await ui.show(
+      `✅ *${escapeMarkdown(pending.name)}* x${pending.quantity} 已送出\\!\n訂購人：${escapeMarkdown(buyerName)}${unrecorded}`,
+      buildCategoryKeyboard(detail.categories),
+    )
   }
 }
