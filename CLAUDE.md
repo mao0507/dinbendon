@@ -28,9 +28,12 @@ pnpm install          # install dependencies
 pnpm dev              # run with ts-node (dev)
 pnpm build            # compile to dist/
 pnpm start            # run compiled dist/index.js
+pnpm test             # node:test via ts-node (src/**/*.test.ts)
 ```
 
-No test suite exists in this project.
+測試只有 `src/order-flow/order-flow.test.ts`：用假 `DinBenDonClient`、記錄呼叫的 `Ui`、`:memory:` SQLite 跑完整點餐流程。
+
+> `better-sqlite3` 的 native binding 若缺（`Could not locate the bindings file`），在該套件目錄執行 `prebuild-install` 即可。
 
 ## PM2
 
@@ -97,10 +100,13 @@ Single-process bot with SQLite persistence. No queue.
 
 ```
 src/
-├── index.ts       — Bot entry: registers all Telegram handlers, owns singletons
-├── dinbendon.ts   — HTTP scraper client for dinbendon.net (Apache Wicket site)
-├── session.ts     — Per-user state machine (Map<chatId, UserSession>)
-├── messages.ts    — MarkdownV2 formatting + inline keyboard builders
+├── index.ts       — Telegram adapter: registers handlers, auth/login, owns singletons
+├── dinbendon.ts   — axios client for dinbendon.net JSON API (bearer token, auto re-login on 401)
+├── order-flow/    — 點餐流程 module（唯一對外入口 index.ts）
+│   ├── index.ts       — OrderFlow.handle(userId, input, ui)、送單邏輯
+│   ├── session.ts     — Per-user state machine (Map<userId, UserSession>)，module 內部
+│   ├── messages.ts    — MarkdownV2 formatting + inline keyboard builders，module 內部
+│   └── callbacks.ts   — callback_data 編碼 (`cb`) 與解碼 (`decodeCallback`)
 ├── database.ts    — BotDatabase: better-sqlite3 wrapper (users, submissions, settings)
 └── admin.ts       — Express admin UI server (localhost only, port 3000)
 ```
@@ -109,30 +115,33 @@ SQLite DB is written to `data/bot.db` (created on first run).
 
 ### Data flow
 
-1. `index.ts` owns one `DinBenDonClient`, one `SessionManager`, and one `BotDatabase`.
-2. All Telegram messages/callbacks route through `index.ts` handlers.
-3. `SessionManager.get(userId)` returns or creates a `UserSession` with a `BotStep` state machine.
-4. `DinBenDonClient` holds a single cookie jar — login is global, not per-user.
-5. On successful `submitItem`, `index.ts` diffs `fetchMyItems` before/after to record new `order_item_id`s in `BotDatabase`.
+1. `index.ts` owns one `DinBenDonClient`, one `BotDatabase`, and one `OrderFlow({ client, db })`.
+2. `index.ts` handles auth (whitelist), login, `/help`, `/version`, admin commands. 點餐相關輸入一律轉成 `FlowInput`（`callback` / `text` / `command: orders|cancel|reset`）交給 `OrderFlow.handle(userId, input, ui)`。
+3. `ui` 是 Telegram adapter（`makeUi`）：`ui.show(text, keyboard)` 第一次呼叫對 callback 是編輯按鈕所在訊息、對 command/text 是新送一則，之後都編輯同一則。
+4. `DinBenDonClient` holds a single bearer token — login is global, not per-user.
+5. On successful `submitItem`, `OrderFlow` diffs `fetchMyItems` before/after to record new `order_item_id`s in `BotDatabase`.
 
-### DinBenDon scraper (`dinbendon.ts`)
+### DinBenDon client (`dinbendon.ts`)
 
-- Target: `https://dinbendon.net/do` — Apache Wicket app (session-based, hidden form fields, math captcha on login)
-- Login: one GET to fetch page → resolve form action with `new URL(action, sessionUrl)` → POST credentials + hidden fields
-- All subsequent requests use the same `axios` instance with `tough-cookie` jar
-- `submitItem` re-fetches the order page for fresh Wicket hidden fields before POSTing
+- Target: JSON REST API (`API_BASE` in `dinbendon.ts`), not HTML scraping. Auth = `Bearer` token from `POST /auth/login`.
+- Axios request interceptor attaches token; response interceptor adopts rotated token from `x-dbd-new-token` header.
+- On 401, interceptor calls `relogin()` with stored credentials and retries the request once (`_retried` flag, `reloginInProgress` guard).
+- Login is global (one token for the whole bot), not per Telegram user.
+- Endpoints: `/order/progress`, `/order/:id/get-add-item`, `/order/:id/add-item`, `/order/:hash/product-group-for-buyer`, `/order/:hash/cancel-item`.
 
-### Session state machine (`BotStep`)
+### Session state machine (`BotStep`, `order-flow/session.ts`)
 
 States: `idle → selecting_order → selecting_category → selecting_item → selecting_variation → entering_quantity → entering_note → entering_buyer_name`
 
 `update(userId, partial)` mutates session in place — intentional exception to immutability rules because session is explicitly mutable state.
 
-### Message formatting (`messages.ts`)
+### Message formatting (`order-flow/messages.ts`)
 
 All text sent to Telegram uses `parse_mode: 'MarkdownV2'`. Every user-facing string must pass through `escapeMarkdown()` before interpolation. Keyboard builders return `{ text, callback_data }[][]` (rows of buttons).
 
-### Callback data format
+### Callback data format (`order-flow/callbacks.ts`)
+
+編碼 (`cb.*`) 與解碼 (`decodeCallback`) 同檔，改格式只改這裡。
 
 | Prefix | Meaning |
 |--------|---------|
@@ -152,9 +161,10 @@ All text sent to Telegram uses `parse_mode: 'MarkdownV2'`. Every user-facing str
 ### Admin
 
 - Express server binds to `127.0.0.1` only (never exposed externally)
-- REST API: `GET/POST /api/users`, `POST /api/users/:userId/authorize`, `POST /api/users/:userId/revoke`, `GET/POST /api/settings`, `GET /api/submissions`
+- REST API: `GET/POST /api/users`, `POST /api/users/:userId/authorize`, `POST /api/users/:userId/revoke`, `GET/POST /api/settings`, `GET /api/submissions`, `GET /api/status` (uptime, memory, SQLite info, `pm2 jlist` for `dinbendon-bot`)
 - Static admin UI served from `public/`
 - Telegram admin commands (`/add_user`, `/revoke_user`, `/users`) require `ADMIN_USER_ID` to be set
+- `/version` replies with `git rev-parse --short=7 HEAD` (runs in `__dirname`, i.e. `dist/`)
 
 ### Whitelist
 
