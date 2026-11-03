@@ -31,14 +31,15 @@ if (!DBD_USERNAME || !DBD_PASSWORD) {
 
 // ─── Singletons ───────────────────────────────────────────────────────────────
 const bot = new TelegramBot(BOT_TOKEN, { polling: true })
-const dbdClient = new DinBenDonClient()
+const dbdClient = new DinBenDonClient({
+  username: DBD_USERNAME,
+  password: DBD_PASSWORD,
+})
 const botDb = new BotDatabase(undefined, WHITELIST_DEFAULT)
 const flow = new OrderFlow({
   client: dbdClient,
   submissions: new Submissions({ client: dbdClient, db: botDb }),
 })
-let clientReady = false
-let loginInProgress = false
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 async function reply(
@@ -79,32 +80,6 @@ async function ensureAuth(chatId: number, userId: number): Promise<boolean> {
     `🔒 您尚未獲得授權，請聯絡管理員。\n您的 ID：\`${userId}\``,
   )
   return false
-}
-
-// ─── Ensure login ─────────────────────────────────────────────────────────────
-async function ensureLogin(chatId: number): Promise<boolean> {
-  if (clientReady) return true
-  if (loginInProgress) {
-    await reply(chatId, '⏳ 正在登入中，請稍候\\.\\.\\.')
-    return false
-  }
-  loginInProgress = true
-  const loadingMsg = await reply(chatId, '🔐 正在登入訂便當系統\\.\\.\\.')
-  try {
-    await dbdClient.login(DBD_USERNAME, DBD_PASSWORD)
-    clientReady = true
-    await bot.deleteMessage(chatId, loadingMsg.message_id)
-    return true
-  } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err)
-    await bot.editMessageText(`❌ 登入失敗：${msg}`, {
-      chat_id: chatId,
-      message_id: loadingMsg.message_id,
-    })
-    return false
-  } finally {
-    loginInProgress = false
-  }
 }
 
 // callback 的第一次 show 編輯按鈕所在訊息；指令與文字輸入則新送一則，之後都編輯同一則。
@@ -183,9 +158,6 @@ bot.onText(/\/orders/, async (msg) => {
   const userId = msg.from?.id ?? chatId
   botDb.upsertUser(userId, msg.from?.username, msg.from?.first_name)
   if (!(await ensureAuth(chatId, userId))) return
-
-  const ok = await ensureLogin(chatId)
-  if (!ok) return
 
   await runFlow(userId, { kind: 'command', name: 'orders' }, makeUi(chatId))
 })
@@ -301,19 +273,8 @@ bot.on('message', async (msg) => {
 // ─── Start ────────────────────────────────────────────────────────────────────
 console.log('🤖 DinBenDon Telegram Bot starting...')
 console.log(`📡 Connected to: ${BOT_TOKEN.slice(0, 10)}...`)
-;(async () => {
-  try {
-    console.log('🔐 Pre-logging in to DinBenDon...')
-    await dbdClient.login(DBD_USERNAME, DBD_PASSWORD)
-    clientReady = true
-    console.log('✅ Pre-login successful!')
-  } catch (err) {
-    console.error(
-      '⚠️ Pre-login failed, will retry on demand:',
-      err instanceof Error ? err.message : err,
-    )
-  }
-})()
+// 暖機：帳密有問題重啟當下就能在 log 看到；失敗不影響啟動，之後依需求再登入
+dbdClient.ready().catch(() => {})
 
 startAdminServer(botDb, ADMIN_PORT)
 console.log('✅ Bot is running. Press Ctrl+C to stop.')
