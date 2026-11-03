@@ -161,7 +161,7 @@ export function buildMyOrderKeyboard(
 
 export function escapeMarkdown(text: unknown): string {
   const s = typeof text === 'string' ? text : String(text ?? '')
-  return s.replace(/[_*[\]()~`>#+\-=|{}.!]/g, '\\$&')
+  return s.replace(/[\\_*[\]()~`>#+\-=|{}.!]/g, '\\$&')
 }
 
 function truncate(text: string, maxLen: number): string {

@@ -1,6 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { OrderFlow, Ui, FlowInput } from './index'
+import { OrderFlow, Ui, FlowInput, escapeMarkdown } from './index'
 import { BotDatabase } from '../database'
 import { DinBenDonClient, Order, OrderDetail, MyOrderItem } from '../dinbendon'
 
@@ -102,6 +102,11 @@ test('完整點餐流程：/orders → 送出 → 記錄 → 取消', async () =
 
   await t.press(cancelBtn!.callback_data)
   assert.equal(t.db.listSubmissions()[0].cancelledAt !== null, true)
+})
+
+test('escapeMarkdown 跳脫反斜線與保留字元', () => {
+  assert.equal(escapeMarkdown('a\\b'), 'a\\\\b')
+  assert.equal(escapeMarkdown('1.5-2!'), '1\\.5\\-2\\!')
 })
 
 test('無效或過期的 callback 不改變狀態也不輸出', async () => {
