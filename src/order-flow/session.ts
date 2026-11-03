@@ -1,4 +1,4 @@
-import { Order, OrderDetail, MenuVariation } from './dinbendon';
+import { Order, OrderDetail, MenuVariation } from '../dinbendon';
 
 export type BotStep =
   | 'idle'

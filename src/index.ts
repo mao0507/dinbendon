@@ -3,23 +3,9 @@ dotenv.config({ path: '.env.local' })
 
 import TelegramBot from 'node-telegram-bot-api'
 import { DinBenDonClient } from './dinbendon'
-import { SessionManager } from './session'
 import { BotDatabase } from './database'
 import { startAdminServer } from './admin'
-import {
-  formatOrderList,
-  formatCategoryList,
-  formatProductList,
-  formatVariationList,
-  formatMyOrder,
-  buildOrderKeyboard,
-  buildCategoryKeyboard,
-  buildProductKeyboard,
-  buildVariationKeyboard,
-  buildQuantityKeyboard,
-  buildMyOrderKeyboard,
-  escapeMarkdown,
-} from './messages'
+import { OrderFlow, Ui, Keyboard, escapeMarkdown } from './order-flow'
 
 // ─── Config ───────────────────────────────────────────────────────────────────
 const BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN ?? ''
@@ -45,8 +31,8 @@ if (!DBD_USERNAME || !DBD_PASSWORD) {
 // ─── Singletons ───────────────────────────────────────────────────────────────
 const bot = new TelegramBot(BOT_TOKEN, { polling: true })
 const dbdClient = new DinBenDonClient()
-const sessions = new SessionManager()
 const botDb = new BotDatabase(undefined, WHITELIST_DEFAULT)
+const flow = new OrderFlow({ client: dbdClient, db: botDb })
 let clientReady = false
 let loginInProgress = false
 
@@ -54,7 +40,7 @@ let loginInProgress = false
 async function reply(
   chatId: number,
   text: string,
-  keyboard?: { text: string; callback_data: string }[][],
+  keyboard?: Keyboard,
 ): Promise<TelegramBot.Message> {
   const options: TelegramBot.SendMessageOptions = { parse_mode: 'MarkdownV2' }
   if (keyboard) options.reply_markup = { inline_keyboard: keyboard }
@@ -65,7 +51,7 @@ async function editMessage(
   chatId: number,
   messageId: number,
   text: string,
-  keyboard?: { text: string; callback_data: string }[][],
+  keyboard?: Keyboard,
 ): Promise<void> {
   const options: TelegramBot.EditMessageTextOptions = {
     chat_id: chatId,
@@ -117,29 +103,30 @@ async function ensureLogin(chatId: number): Promise<boolean> {
   }
 }
 
-async function showCategories(
-  chatId: number,
-  messageId: number,
-  userId: number,
-): Promise<void> {
-  const session = sessions.get(userId)
-  const detail = session.orderDetail
-  if (!detail) {
-    await editMessage(chatId, messageId, '請先使用 /orders 選擇訂單。')
-    return
+// callback 的第一次 show 編輯按鈕所在訊息；指令與文字輸入則新送一則，之後都編輯同一則。
+function makeUi(chatId: number, messageId?: number): Ui {
+  let current = messageId
+  return {
+    async show(text, keyboard) {
+      if (current === undefined) {
+        current = (await reply(chatId, text, keyboard)).message_id
+      } else {
+        await editMessage(chatId, current, text, keyboard)
+      }
+    },
   }
-  sessions.update(userId, {
-    step: 'selecting_category',
-    selectedCategoryIdx: undefined,
-    pendingProduct: undefined,
-    pendingItem: undefined,
-  })
-  await editMessage(
-    chatId,
-    messageId,
-    formatCategoryList(detail),
-    buildCategoryKeyboard(detail.categories),
-  )
+}
+
+async function runFlow(
+  userId: number,
+  input: Parameters<OrderFlow['handle']>[1],
+  ui: Ui,
+): Promise<void> {
+  try {
+    await flow.handle(userId, input, ui)
+  } catch (err) {
+    console.error('[flow] error:', err)
+  }
 }
 
 // ─── /start ───────────────────────────────────────────────────────────────────
@@ -147,7 +134,7 @@ bot.onText(/\/start/, async (msg) => {
   const chatId = msg.chat.id
   const userId = msg.from?.id ?? chatId
   botDb.upsertUser(userId, msg.from?.username, msg.from?.first_name)
-  sessions.reset(userId)
+  await runFlow(userId, { kind: 'command', name: 'reset' }, makeUi(chatId))
 
   const authorized =
     !botDb.isWhitelistEnabled() || isAdmin(userId) || botDb.isAuthorized(userId)
@@ -196,33 +183,7 @@ bot.onText(/\/orders/, async (msg) => {
   const ok = await ensureLogin(chatId)
   if (!ok) return
 
-  const loadingMsg = await reply(chatId, '⏳ 抓取訂單中\\.\\.\\.')
-  let loadingDeleted = false
-
-  try {
-    const orders = await dbdClient.fetchOpenOrders()
-    console.log(`[orders] fetched ${orders.length} orders for user ${userId}`)
-    sessions.update(userId, { step: 'selecting_order', orders })
-
-    await bot.deleteMessage(chatId, loadingMsg.message_id)
-    loadingDeleted = true
-
-    if (orders.length === 0) {
-      await reply(chatId, '😔 目前沒有開放中的訂單。')
-      return
-    }
-    await reply(chatId, formatOrderList(orders), buildOrderKeyboard(orders))
-  } catch (err) {
-    console.error('[orders] error:', err)
-    const errText = `❌ 抓取訂單失敗：${escapeMarkdown(err instanceof Error ? err.message : String(err))}`
-    try {
-      if (loadingDeleted) await reply(chatId, errText)
-      else await editMessage(chatId, loadingMsg.message_id, errText)
-    } catch (sendErr) {
-      console.error('[orders] failed to send error msg:', sendErr)
-      bot.sendMessage(chatId, '❌ 抓取訂單失敗，請稍後再試。').catch(() => {})
-    }
-  }
+  await runFlow(userId, { kind: 'command', name: 'orders' }, makeUi(chatId))
 })
 
 // ─── /cancel ──────────────────────────────────────────────────────────────────
@@ -230,12 +191,7 @@ bot.onText(/\/cancel/, async (msg) => {
   const chatId = msg.chat.id
   const userId = msg.from?.id ?? chatId
   if (!(await ensureAuth(chatId, userId))) return
-  sessions.update(userId, {
-    step: 'idle',
-    pendingItem: undefined,
-    pendingProduct: undefined,
-  })
-  await reply(chatId, '✅ 已取消目前操作。')
+  await runFlow(userId, { kind: 'command', name: 'cancel' }, makeUi(chatId))
 })
 
 // ─── Admin: /add_user ──────────────────────────────────────────────────────────
@@ -321,306 +277,11 @@ bot.on('callback_query', async (query) => {
   const userId = query.from.id
   if (!(await ensureAuth(chatId, userId))) return
 
-  const data = query.data ?? ''
-  const session = sessions.get(userId)
-
-  // ── Order selected ──────────────────────────────────────────────────────────
-  if (data.startsWith('order:')) {
-    const idx = parseInt(data.split(':')[1])
-    const order = session.orders[idx]
-    if (!order) return
-
-    sessions.update(userId, { selectedOrder: order })
-    await editMessage(
-      chatId,
-      messageId,
-      `⏳ 載入 *${escapeMarkdown(order.shopName)}* 菜單中\\.\\.\\.`,
-    )
-
-    try {
-      const detail = await dbdClient.fetchOrderDetail(order)
-      sessions.update(userId, {
-        orderDetail: detail,
-        step: 'selecting_category',
-      })
-      await editMessage(
-        chatId,
-        messageId,
-        formatCategoryList(detail),
-        buildCategoryKeyboard(detail.categories),
-      )
-    } catch (err) {
-      await editMessage(
-        chatId,
-        messageId,
-        `❌ 載入菜單失敗：${escapeMarkdown(err instanceof Error ? err.message : String(err))}`,
-      )
-    }
-    return
-  }
-
-  // ── Category selected ───────────────────────────────────────────────────────
-  if (data.startsWith('category:')) {
-    const idx = parseInt(data.split(':')[1])
-    const detail = session.orderDetail
-    if (!detail) return
-    const category = detail.categories[idx]
-    if (!category) return
-
-    sessions.update(userId, {
-      step: 'selecting_item',
-      selectedCategoryIdx: idx,
-      pendingProduct: undefined,
-    })
-    await editMessage(
-      chatId,
-      messageId,
-      formatProductList(detail.order.shopName, category.name),
-      buildProductKeyboard(category.products, idx),
-    )
-    return
-  }
-
-  // ── Product selected ────────────────────────────────────────────────────────
-  if (data.startsWith('product:')) {
-    const productId = data.slice('product:'.length)
-    const detail = session.orderDetail
-    if (!detail) return
-
-    let foundProduct:
-      | {
-          id: string
-          name: string
-          variations: { id: string; name: string | null; price: number }[]
-        }
-      | undefined
-    for (const cat of detail.categories) {
-      foundProduct = cat.products.find((p) => p.id === productId)
-      if (foundProduct) break
-    }
-    if (!foundProduct) return
-
-    if (
-      foundProduct.variations.length === 1 &&
-      !foundProduct.variations[0].name
-    ) {
-      const v = foundProduct.variations[0]
-      sessions.update(userId, {
-        step: 'entering_quantity',
-        pendingProduct: undefined,
-        pendingItem: {
-          menuItemId: v.id,
-          productId: foundProduct.id,
-          name: foundProduct.name,
-          price: v.price,
-        },
-      })
-      await editMessage(
-        chatId,
-        messageId,
-        `🍱 *${escapeMarkdown(foundProduct.name)}* \\- $${v.price}\n\n請選擇數量：`,
-        buildQuantityKeyboard(),
-      )
-    } else {
-      sessions.update(userId, {
-        step: 'selecting_variation',
-        pendingProduct: {
-          productId: foundProduct.id,
-          productName: foundProduct.name,
-          variations: foundProduct.variations,
-        },
-        pendingItem: undefined,
-      })
-      await editMessage(
-        chatId,
-        messageId,
-        formatVariationList(foundProduct.name),
-        buildVariationKeyboard(foundProduct.variations, foundProduct.name),
-      )
-    }
-    return
-  }
-
-  // ── Variation selected ──────────────────────────────────────────────────────
-  if (data.startsWith('variation:')) {
-    const variationId = data.slice('variation:'.length)
-    const pending = session.pendingProduct
-    if (!pending) return
-
-    const variation = pending.variations.find((v) => v.id === variationId)
-    if (!variation) return
-
-    const displayName = variation.name
-      ? `${escapeMarkdown(pending.productName)} \\(${escapeMarkdown(variation.name)}\\)`
-      : escapeMarkdown(pending.productName)
-
-    sessions.update(userId, {
-      step: 'entering_quantity',
-      pendingItem: {
-        menuItemId: variationId,
-        productId: pending.productId,
-        name: variation.name
-          ? `${pending.productName} (${variation.name})`
-          : pending.productName,
-        price: variation.price,
-      },
-    })
-    await editMessage(
-      chatId,
-      messageId,
-      `🍱 *${displayName}* \\- $${variation.price}\n\n請選擇數量：`,
-      buildQuantityKeyboard(),
-    )
-    return
-  }
-
-  // ── Quantity selected ───────────────────────────────────────────────────────
-  if (data.startsWith('qty:')) {
-    const qty = parseInt(data.split(':')[1])
-    const pending = session.pendingItem
-    if (!pending) return
-
-    sessions.update(userId, {
-      pendingItem: { ...pending, quantity: qty },
-      step: 'entering_note',
-    })
-    await editMessage(
-      chatId,
-      messageId,
-      `✏️ *${escapeMarkdown(pending.name)}* x${qty}\n\n要加備註嗎？直接輸入備註內容，或點選「不加備註」：`,
-      [
-        [{ text: '📝 不加備註', callback_data: 'note:skip' }],
-        [{ text: '❌ 取消', callback_data: 'cancel' }],
-      ],
-    )
-    return
-  }
-
-  // ── Note: skip → ask buyer name ─────────────────────────────────────────────
-  if (data === 'note:skip') {
-    sessions.update(userId, { step: 'entering_buyer_name' })
-    await askBuyerName(chatId, messageId, userId)
-    return
-  }
-
-  // ── View my submitted order ─────────────────────────────────────────────────
-  if (data === 'my:order') {
-    const detail = session.orderDetail
-    if (!detail) return
-
-    await editMessage(chatId, messageId, '⏳ 載入已送出品項\\.\\.\\.')
-    try {
-      const allItems = await dbdClient.fetchMyItems(detail.order.id)
-      const myIds = botDb.getMyItemIds(userId, detail.order.id)
-      const myItems = allItems.filter((item) =>
-        item.orderItemIds.some((id) => myIds.has(id)),
-      )
-      await editMessage(
-        chatId,
-        messageId,
-        formatMyOrder(detail.order.shopName, allItems),
-        buildMyOrderKeyboard(myItems),
-      )
-    } catch (err) {
-      await editMessage(
-        chatId,
-        messageId,
-        `❌ 載入失敗：${escapeMarkdown(err instanceof Error ? err.message : String(err))}`,
-        [[{ text: '🔙 回菜單', callback_data: 'back:cat' }]],
-      )
-    }
-    return
-  }
-
-  // ── Cancel submitted item ───────────────────────────────────────────────────
-  if (data.startsWith('cancel:item:')) {
-    const detail = session.orderDetail
-    if (!detail) return
-
-    const ids = data
-      .slice('cancel:item:'.length)
-      .split(',')
-      .map(Number)
-      .filter((n) => !isNaN(n))
-    if (ids.length === 0) return
-
-    await editMessage(chatId, messageId, '⏳ 取消中\\.\\.\\.')
-    try {
-      await dbdClient.cancelItem(detail.order.id, ids)
-      botDb.recordCancellation(ids)
-      const allItems = await dbdClient.fetchMyItems(detail.order.id)
-      const myIds = botDb.getMyItemIds(userId, detail.order.id)
-      const myItems = allItems.filter((item) =>
-        item.orderItemIds.some((id) => myIds.has(id)),
-      )
-      await editMessage(
-        chatId,
-        messageId,
-        formatMyOrder(detail.order.shopName, allItems),
-        buildMyOrderKeyboard(myItems),
-      )
-    } catch (err) {
-      await editMessage(
-        chatId,
-        messageId,
-        `❌ 取消失敗：${escapeMarkdown(err instanceof Error ? err.message : String(err))}`,
-        [[{ text: '🔙 回菜單', callback_data: 'back:cat' }]],
-      )
-    }
-    return
-  }
-
-  // ── Back to categories ──────────────────────────────────────────────────────
-  if (data === 'back:cat') {
-    await showCategories(chatId, messageId, userId)
-    return
-  }
-
-  // ── Back to products ────────────────────────────────────────────────────────
-  if (data === 'back:products') {
-    const detail = session.orderDetail
-    const catIdx = session.selectedCategoryIdx
-    if (!detail || catIdx === undefined) {
-      await showCategories(chatId, messageId, userId)
-      return
-    }
-    const category = detail.categories[catIdx]
-    sessions.update(userId, {
-      step: 'selecting_item',
-      pendingProduct: undefined,
-    })
-    await editMessage(
-      chatId,
-      messageId,
-      formatProductList(detail.order.shopName, category.name),
-      buildProductKeyboard(category.products, catIdx),
-    )
-    return
-  }
-
-  // ── Cancel ───────────────────────────────────────────────────────────────────
-  if (data === 'cancel') {
-    const hasPending = session.pendingItem || session.pendingProduct
-    sessions.update(userId, {
-      pendingItem: undefined,
-      pendingProduct: undefined,
-    })
-    if (hasPending && session.orderDetail) {
-      await showCategories(chatId, messageId, userId)
-    } else {
-      sessions.update(userId, {
-        step: 'idle',
-        orderDetail: undefined,
-        selectedOrder: undefined,
-      })
-      await editMessage(
-        chatId,
-        messageId,
-        '✅ 已離開訂餐流程。\n\n輸入 /orders 重新開始。',
-      )
-    }
-    return
-  }
+  await runFlow(
+    userId,
+    { kind: 'callback', data: query.data ?? '' },
+    makeUi(chatId, messageId),
+  )
 })
 
 // ─── Text messages ────────────────────────────────────────────────────────────
@@ -630,133 +291,8 @@ bot.on('message', async (msg) => {
   const userId = msg.from?.id ?? chatId
   if (!(await ensureAuth(chatId, userId))) return
 
-  const session = sessions.get(userId)
-
-  if (session.step === 'entering_note' && session.pendingItem) {
-    const note = msg.text.trim()
-    sessions.update(userId, {
-      pendingItem: { ...session.pendingItem, note },
-      step: 'entering_buyer_name',
-    })
-    await reply(chatId, '✅ 備註已記錄，請輸入*訂購人姓名*：', [
-      [{ text: '❌ 取消', callback_data: 'cancel' }],
-    ])
-    return
-  }
-
-  if (session.step === 'entering_buyer_name') {
-    await submitItem(chatId, userId, msg.text.trim())
-  }
+  await runFlow(userId, { kind: 'text', text: msg.text }, makeUi(chatId))
 })
-
-// ─── Submit helpers ───────────────────────────────────────────────────────────
-async function askBuyerName(
-  chatId: number,
-  messageId: number,
-  userId: number,
-): Promise<void> {
-  const session = sessions.get(userId)
-  const pending = session.pendingItem
-  if (!pending) return
-
-  const noteText = pending.note ? `\n備註：${escapeMarkdown(pending.note)}` : ''
-  await editMessage(
-    chatId,
-    messageId,
-    `🍱 *${escapeMarkdown(pending.name)}* x${pending.quantity ?? 1}${noteText}\n\n請輸入*訂購人姓名*：`,
-    [[{ text: '❌ 取消', callback_data: 'cancel' }]],
-  )
-}
-
-async function submitItem(
-  chatId: number,
-  userId: number,
-  buyerName: string,
-): Promise<void> {
-  const session = sessions.get(userId)
-  const pending = session.pendingItem
-  if (!pending || !session.orderDetail || pending.quantity === undefined) return
-
-  const orderHashId = session.orderDetail.order.id
-  const loadingMsg = await reply(
-    chatId,
-    `⏳ 以「${escapeMarkdown(buyerName)}」送出\\.\\.\\. `,
-  )
-
-  // Snapshot existing items before submit so we can identify newly created ones
-  const beforeItems = await dbdClient.fetchMyItems(orderHashId).catch(() => [])
-  const beforeIds = new Set(beforeItems.flatMap((i) => i.orderItemIds))
-
-  try {
-    const success = await dbdClient.submitItem(
-      session.orderDetail,
-      {
-        menuItemId: pending.menuItemId,
-        productId: pending.productId,
-        quantity: pending.quantity,
-        note: pending.note,
-      },
-      buyerName,
-    )
-
-    sessions.update(userId, {
-      pendingItem: undefined,
-      pendingProduct: undefined,
-      step: 'selecting_category',
-    })
-
-    if (success) {
-      // Find new orderItemIds created by this submission
-      const afterItems = await dbdClient
-        .fetchMyItems(orderHashId)
-        .catch(() => [])
-      const newIds = afterItems
-        .flatMap((i) => i.orderItemIds)
-        .filter((id) => !beforeIds.has(id))
-      if (newIds.length > 0) {
-        botDb.recordSubmission(
-          userId,
-          orderHashId,
-          newIds,
-          pending.name,
-          buyerName,
-          session.orderDetail?.order.organizer,
-        )
-      }
-
-      await bot.editMessageText(
-        `✅ *${escapeMarkdown(pending.name)}* x${pending.quantity} 已送出\\!\n訂購人：${escapeMarkdown(buyerName)}`,
-        {
-          chat_id: chatId,
-          message_id: loadingMsg.message_id,
-          parse_mode: 'MarkdownV2',
-          reply_markup: {
-            inline_keyboard: buildCategoryKeyboard(
-              session.orderDetail!.categories,
-            ),
-          },
-        },
-      )
-    } else {
-      await bot.editMessageText('❌ 送出失敗，請至網頁確認。', {
-        chat_id: chatId,
-        message_id: loadingMsg.message_id,
-        parse_mode: 'MarkdownV2',
-      })
-    }
-  } catch (err) {
-    const errMsg = escapeMarkdown(
-      err instanceof Error ? err.message : String(err),
-    )
-    await bot
-      .editMessageText(`❌ 送出失敗：${errMsg}`, {
-        chat_id: chatId,
-        message_id: loadingMsg.message_id,
-        parse_mode: 'MarkdownV2',
-      })
-      .catch(() => reply(chatId, `❌ 送出失敗：${errMsg}`))
-  }
-}
 
 // ─── Start ────────────────────────────────────────────────────────────────────
 console.log('🤖 DinBenDon Telegram Bot starting...')
