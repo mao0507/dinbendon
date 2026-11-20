@@ -8,6 +8,7 @@ import { startAdminServer } from './admin'
 import { Submissions } from './submissions'
 import { Access } from './access'
 import { OrderFlow, Ui, Keyboard, escapeMarkdown } from './order-flow'
+import { LOG_FILES, LogKind, tailLines, fitTelegram } from './logs'
 
 // ─── Config ───────────────────────────────────────────────────────────────────
 const BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN ?? ''
@@ -60,6 +61,7 @@ const ADMIN_COMMANDS: TelegramBot.BotCommand[] = [
   { command: 'users', description: '列出使用者（管理員）' },
   { command: 'add_user', description: '授權使用者 <userId>（管理員）' },
   { command: 'revoke_user', description: '撤銷授權 <userId>（管理員）' },
+  { command: 'log', description: '查看 log [error|out] [行數]（管理員）' },
 ]
 bot.setMyCommands(USER_COMMANDS).catch((err) => console.error('[menu] setMyCommands failed:', err))
 if (ADMIN_USER_ID) {
@@ -244,6 +246,25 @@ bot.onText(/\/users/, async (msg) => {
     return `${status} ${name}${tag} — \`${u.userId}\``
   })
   await reply(chatId, `👥 *用戶清單*\n\n${lines.join('\n')}`)
+})
+
+// ─── Admin: /log [error|out] [n] ──────────────────────────────────────────────
+bot.onText(/^\/log(?:@\w+)?(?:\s+(error|out))?(?:\s+(\d+))?\s*$/, async (msg, match) => {
+  const chatId = msg.chat.id
+  const userId = msg.from?.id ?? chatId
+  if (!(await requireAdmin(chatId, userId))) return
+  const kind: LogKind = (match?.[1] as LogKind) ?? 'error'
+  const n = Math.min(Math.max(parseInt(match?.[2] ?? '30'), 1), 200)
+  const lines = tailLines(LOG_FILES[kind], n)
+  if (lines === null) {
+    await reply(chatId, `⚠️ 找不到 \`${kind}\` log 檔（僅 PM2 執行時才會產生）。`)
+    return
+  }
+  const body = lines.length ? fitTelegram(lines.join('\n')) : '(空)'
+  const esc = (s: string) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+  await bot.sendMessage(chatId, `📜 <b>${kind}.log</b> 最後 ${lines.length} 行\n<pre>${esc(body)}</pre>`, {
+    parse_mode: 'HTML',
+  })
 })
 
 // ─── /version ─────────────────────────────────────────────────────────────────
