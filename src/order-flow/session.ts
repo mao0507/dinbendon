@@ -18,6 +18,8 @@ export interface UserSession {
   selectedOrder?: Order;
   orderDetail?: OrderDetail;
   selectedCategoryIdx?: number;
+  /** 目前有效的選單訊息；其他訊息上的按鈕視為過期 */
+  activeMessageId?: number;
   pendingProduct?: {
     productId: string;
     productName: string;

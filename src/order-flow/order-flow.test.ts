@@ -59,19 +59,37 @@ function setup() {
 
   const shown: string[] = []
   let lastKeyboard: { text: string; callback_data: string }[][] | undefined
-  const ui: Ui = {
-    async show(text, keyboard) {
-      shown.push(text)
-      lastKeyboard = keyboard
-    },
+  // 模仿 makeUi：command/text 新送一則（新 id），callback 編輯按鈕所在訊息
+  let nextId = 1
+  let lastMsgId = 0
+  const makeUi = (messageId?: number): Ui => {
+    let current = messageId
+    return {
+      async show(text, keyboard) {
+        shown.push(text)
+        lastKeyboard = keyboard
+        current ??= nextId++
+        lastMsgId = current
+        return current
+      },
+    }
   }
-  const send = (input: FlowInput) => flow.handle(1, input, ui)
+  const send = (input: FlowInput) =>
+    flow.handle(1, input, makeUi(input.kind === 'callback' ? input.messageId : undefined))
   const press = (data: string) => send({ kind: 'callback', data })
+  // 從指定訊息按按鈕（預設最後顯示的那則），會做過期檢查
+  const click = (data: string, messageId = lastMsgId) =>
+    send({ kind: 'callback', data, messageId })
   const toBuyerName = async () => {
     await send({ kind: 'command', name: 'orders' })
     for (const d of ['order:0', 'category:0', 'product:10', 'qty:2', 'note:skip']) await press(d)
   }
-  return { send, press, shown, db, submitted, ctl, toBuyerName, keyboard: () => lastKeyboard }
+  return {
+    send, press, click, shown, db, submitted, ctl, toBuyerName,
+    keyboard: () => lastKeyboard,
+    buttons: () => (lastKeyboard ?? []).flat().map((b) => b.callback_data),
+    msgId: () => lastMsgId,
+  }
 }
 
 test('完整點餐流程：/orders → 送出 → 記錄 → 取消', async () => {
@@ -153,4 +171,55 @@ test('送出進行中再傳姓名不會重送', async () => {
   await first
 
   assert.equal(t.submitted.length, 1)
+})
+
+test('第二次點餐可直接用上次的姓名', async () => {
+  const t = setup()
+  await t.toBuyerName()
+  assert.ok(!t.buttons().includes('name:last'))
+  await t.send({ kind: 'text', text: '阿明' })
+
+  for (const d of ['category:0', 'product:10', 'qty:1', 'note:skip']) await t.press(d)
+  assert.ok(t.buttons().includes('name:last'))
+  await t.press('name:last')
+  assert.match(t.shown.at(-1)!, /已送出/)
+  assert.equal((t.submitted[1] as { buyer: string }).buyer, '阿明')
+})
+
+test('沒有開放訂單或離開流程時提供開啟訂單按鈕', async () => {
+  const t = setup()
+  await t.send({ kind: 'command', name: 'cancel' })
+  assert.deepEqual(t.buttons(), ['orders'])
+  await t.press('orders')
+  assert.match(t.shown.at(-1)!, /開放中的訂單/)
+})
+
+test('舊訊息的按鈕視為過期，開啟訂單按鈕永遠可用', async () => {
+  const t = setup()
+  await t.send({ kind: 'command', name: 'orders' })
+  const oldMsg = t.msgId()
+  await t.send({ kind: 'command', name: 'orders' }) // 新的一則
+  await t.click('order:0', oldMsg)
+  assert.match(t.shown.at(-1)!, /已過期/)
+  assert.deepEqual(t.buttons(), ['orders'])
+
+  await t.click('orders', oldMsg)
+  assert.match(t.shown.at(-1)!, /開放中的訂單/)
+  await t.click('order:0') // 剛重開的那則有效
+  assert.match(t.shown.at(-1)!, /請選擇分類/)
+})
+
+test('上一步：姓名 → 備註 → 數量 → 餐點；中途取消回餐點列表', async () => {
+  const t = setup()
+  await t.toBuyerName()
+  await t.press('back')
+  assert.match(t.shown.at(-1)!, /要加備註嗎/)
+  await t.press('back')
+  assert.match(t.shown.at(-1)!, /請選擇數量/)
+  await t.press('back')
+  assert.match(t.shown.at(-1)!, /請選擇餐點/)
+
+  await t.press('product:10')
+  await t.press('cancel')
+  assert.match(t.shown.at(-1)!, /請選擇餐點/)
 })

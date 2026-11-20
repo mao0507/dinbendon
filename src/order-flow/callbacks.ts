@@ -12,6 +12,9 @@ export type Callback =
   | { type: 'backCat' }
   | { type: 'backProducts' }
   | { type: 'cancel' }
+  | { type: 'orders' }
+  | { type: 'back' }
+  | { type: 'lastName' }
 
 export const cb = {
   order: (idx: number) => `order:${idx}`,
@@ -25,6 +28,9 @@ export const cb = {
   backCat: 'back:cat',
   backProducts: 'back:products',
   cancel: 'cancel',
+  orders: 'orders',
+  back: 'back',
+  lastName: 'name:last',
 }
 
 export function decodeCallback(data: string): Callback | null {
@@ -33,6 +39,9 @@ export function decodeCallback(data: string): Callback | null {
   if (data === cb.backCat) return { type: 'backCat' }
   if (data === cb.backProducts) return { type: 'backProducts' }
   if (data === cb.cancel) return { type: 'cancel' }
+  if (data === cb.orders) return { type: 'orders' }
+  if (data === cb.back) return { type: 'back' }
+  if (data === cb.lastName) return { type: 'lastName' }
   if (data.startsWith('cancel:item:')) {
     const ids = data
       .slice('cancel:item:'.length)

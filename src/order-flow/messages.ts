@@ -53,7 +53,10 @@ export function buildCategoryKeyboard(
     },
   ])
   buttons.push([{ text: '📋 查看已送出訂單', callback_data: cb.myOrder }])
-  buttons.push([{ text: '❌ 取消', callback_data: cb.cancel }])
+  buttons.push([
+    { text: '🔙 回訂單列表', callback_data: cb.orders },
+    { text: '❌ 離開', callback_data: cb.cancel },
+  ])
   return buttons
 }
 
@@ -117,8 +120,33 @@ export function buildQuantityKeyboard(): {
       text: String(q),
       callback_data: cb.qty(q),
     })),
-    [{ text: '❌ 取消', callback_data: cb.cancel }],
+    BACK_CANCEL_ROW,
   ]
+}
+
+const BACK_CANCEL_ROW = [
+  { text: '🔙 上一步', callback_data: cb.back },
+  { text: '❌ 取消', callback_data: cb.cancel },
+]
+
+// ─── Note / buyer name ────────────────────────────────────────────────────────
+
+export function buildNoteKeyboard(): Keyboard {
+  return [[{ text: '📝 不加備註', callback_data: cb.noteSkip }], BACK_CANCEL_ROW]
+}
+
+export function buildBuyerNameKeyboard(lastName?: string): Keyboard {
+  const rows: Keyboard = []
+  if (lastName) {
+    rows.push([{ text: `👤 用「${truncate(lastName, 16)}」`, callback_data: cb.lastName }])
+  }
+  rows.push(BACK_CANCEL_ROW)
+  return rows
+}
+
+/** 流程結束或出錯時的出口按鈕 */
+export function buildOrdersButton(text = '📋 開啟訂單'): Keyboard {
+  return [[{ text, callback_data: cb.orders }]]
 }
 
 // ─── My order ─────────────────────────────────────────────────────────────────

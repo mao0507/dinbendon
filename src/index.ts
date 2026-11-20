@@ -122,6 +122,7 @@ function makeUi(chatId: number, messageId?: number): Ui {
       } else {
         await editMessage(chatId, current, text, keyboard)
       }
+      return current
     },
   }
 }
@@ -293,7 +294,7 @@ bot.on('callback_query', async (query) => {
 
   await runFlow(
     userId,
-    { kind: 'callback', data: query.data ?? '' },
+    { kind: 'callback', data: query.data ?? '', messageId },
     makeUi(chatId, messageId),
   )
 })

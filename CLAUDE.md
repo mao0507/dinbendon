@@ -163,9 +163,13 @@ All text sent to Telegram uses `parse_mode: 'MarkdownV2'`. Every user-facing str
 | `cancel:item:ID,ID,...` | cancel submitted order items by orderItemId |
 | `back:cat` | navigate back to category list |
 | `back:products` | navigate back to product list |
-| `confirm:yes/no` | final order confirm |
 | `note:skip` | skip note entry |
-| `cancel` | cancel current flow |
+| `name:last` | 用上次輸入的訂購人姓名送出（記憶體，重啟清空） |
+| `back` | 上一步（依目前 step：姓名→備註→數量→口味/餐點） |
+| `orders` | 重新抓訂單列表（過期訊息上也可用） |
+| `cancel` | 點餐中→回餐點列表；分類畫面→離開流程 |
+
+過期判斷：session 記 `activeMessageId`（最後一次 `ui.show` 的訊息），callback 帶的 `messageId` 不同即顯示「選單已過期」，`orders` 例外。
 
 ### Admin
 
