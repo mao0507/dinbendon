@@ -47,6 +47,28 @@ const flow = new OrderFlow({
   submissions: new Submissions({ client: dbdClient, db: botDb }),
 })
 
+// ─── Menu（左下角「/」選單）────────────────────────────────────────────────────
+const USER_COMMANDS: TelegramBot.BotCommand[] = [
+  { command: 'orders', description: '查看開放中的訂單' },
+  { command: 'cancel', description: '取消目前點餐流程' },
+  { command: 'help', description: '使用說明' },
+  { command: 'version', description: '查看版本資訊' },
+  { command: 'start', description: '重新開始' },
+]
+const ADMIN_COMMANDS: TelegramBot.BotCommand[] = [
+  ...USER_COMMANDS,
+  { command: 'users', description: '列出使用者（管理員）' },
+  { command: 'add_user', description: '授權使用者 <userId>（管理員）' },
+  { command: 'revoke_user', description: '撤銷授權 <userId>（管理員）' },
+]
+bot.setMyCommands(USER_COMMANDS).catch((err) => console.error('[menu] setMyCommands failed:', err))
+if (ADMIN_USER_ID) {
+  // 私聊 chat id = user id，管理員才看得到管理指令
+  bot
+    .setMyCommands(ADMIN_COMMANDS, { scope: { type: 'chat', chat_id: ADMIN_USER_ID } })
+    .catch((err) => console.error('[menu] admin setMyCommands failed:', err))
+}
+
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 async function reply(
   chatId: number,
