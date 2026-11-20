@@ -5,7 +5,10 @@ import {
   MenuCategory,
   MenuProduct,
   MenuVariation,
-} from './dinbendon'
+} from '../dinbendon'
+import { cb } from './callbacks'
+
+export type Keyboard = { text: string; callback_data: string }[][]
 
 // ─── Order list ───────────────────────────────────────────────────────────────
 
@@ -30,7 +33,7 @@ export function buildOrderKeyboard(
     const shop = truncate(o.shopName || o.title, 20)
     const organizer = o.organizer ? truncate(o.organizer, 10) : ''
     const label = organizer ? `${organizer} - ${shop}` : shop
-    return [{ text: label, callback_data: `order:${i}` }]
+    return [{ text: label, callback_data: cb.order(i) }]
   })
 }
 
@@ -46,11 +49,11 @@ export function buildCategoryKeyboard(
   const buttons = categories.map((cat, i) => [
     {
       text: `${cat.name} (${cat.products.length})`,
-      callback_data: `category:${i}`,
+      callback_data: cb.category(i),
     },
   ])
-  buttons.push([{ text: '📋 查看已送出訂單', callback_data: 'my:order' }])
-  buttons.push([{ text: '❌ 取消', callback_data: 'cancel' }])
+  buttons.push([{ text: '📋 查看已送出訂單', callback_data: cb.myOrder }])
+  buttons.push([{ text: '❌ 取消', callback_data: cb.cancel }])
   return buttons
 }
 
@@ -75,11 +78,11 @@ export function buildProductKeyboard(
     return [
       {
         text: `${truncate(p.name, 24)} ${priceStr}`,
-        callback_data: `product:${p.id}`,
+        callback_data: cb.product(p.id),
       },
     ]
   })
-  buttons.push([{ text: '🔙 回分類', callback_data: 'back:cat' }])
+  buttons.push([{ text: '🔙 回分類', callback_data: cb.backCat }])
   return buttons
 }
 
@@ -97,9 +100,9 @@ export function buildVariationKeyboard(
     const label = v.name
       ? `${v.name} - $${v.price}`
       : `${productName} - $${v.price}`
-    return [{ text: label, callback_data: `variation:${v.id}` }]
+    return [{ text: label, callback_data: cb.variation(v.id) }]
   })
-  buttons.push([{ text: '🔙 回餐點', callback_data: 'back:products' }])
+  buttons.push([{ text: '🔙 回餐點', callback_data: cb.backProducts }])
   return buttons
 }
 
@@ -112,9 +115,9 @@ export function buildQuantityKeyboard(): {
   return [
     [1, 2, 3, 4, 5].map((q) => ({
       text: String(q),
-      callback_data: `qty:${q}`,
+      callback_data: cb.qty(q),
     })),
-    [{ text: '❌ 取消', callback_data: 'cancel' }],
+    [{ text: '❌ 取消', callback_data: cb.cancel }],
   ]
 }
 
@@ -144,13 +147,13 @@ export function buildMyOrderKeyboard(
     .map((item) => [
       {
         text: `🗑 取消：${truncate(item.productName, 16)} (${truncate(item.buyerName, 8)}) x${item.qty}`,
-        callback_data: `cancel:item:${item.orderItemIds.join(',')}`,
+        callback_data: cb.cancelItems(item.orderItemIds),
       },
     ])
   return [
     ...cancelButtons,
-    [{ text: '🔄 重新整理', callback_data: 'my:order' }],
-    [{ text: '🔙 回菜單', callback_data: 'back:cat' }],
+    [{ text: '🔄 重新整理', callback_data: cb.myOrder }],
+    [{ text: '🔙 回菜單', callback_data: cb.backCat }],
   ]
 }
 
@@ -158,7 +161,7 @@ export function buildMyOrderKeyboard(
 
 export function escapeMarkdown(text: unknown): string {
   const s = typeof text === 'string' ? text : String(text ?? '')
-  return s.replace(/[_*[\]()~`>#+\-=|{}.!]/g, '\\$&')
+  return s.replace(/[\\_*[\]()~`>#+\-=|{}.!]/g, '\\$&')
 }
 
 function truncate(text: string, maxLen: number): string {

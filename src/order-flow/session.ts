@@ -1,4 +1,4 @@
-import { Order, OrderDetail, MenuVariation } from './dinbendon';
+import { Order, OrderDetail, MenuVariation } from '../dinbendon';
 
 export type BotStep =
   | 'idle'
@@ -8,7 +8,8 @@ export type BotStep =
   | 'selecting_variation'
   | 'entering_quantity'
   | 'entering_note'
-  | 'entering_buyer_name';
+  | 'entering_buyer_name'
+  | 'submitting';
 
 export interface UserSession {
   chatId: number;
