@@ -43,7 +43,11 @@ export interface MyOrderItem {
   cancelable: boolean;
 }
 
-const API_BASE = 'https://dinbendon.net/mvc/api';
+// 新點餐網站（https://w1323wwww-wq.github.io/dinbendon-web/）背後的 Cloudflare Worker，
+// 用群組帳號代打 dinbendon.net API，路徑相同、回應同樣包在 { data, error }。
+const WORKER_URL = 'https://dinbendon-proxy.w1323wwww.workers.dev';
+// ponytail: Worker 只收來自網頁的 Origin，bot 自己帶；站長改檢查方式時這裡會壞（403 forbidden origin）
+const WEB_ORIGIN = 'https://w1323wwww-wq.github.io';
 
 function formatExpireDate(epochMs: number): string {
   const d = new Date(epochMs);
@@ -54,121 +58,60 @@ function formatExpireDate(epochMs: number): string {
   return `${mm}/${dd} ${hh}:${min}`;
 }
 
-/** 登入失敗。message 直接給使用者看；網站的原始錯誤放 detail 並寫 log。 */
-export class LoginError extends Error {
-  constructor(readonly detail?: unknown) {
-    super('無法登入訂便當系統，請稍後再試。若持續發生請聯絡管理員。');
-    this.name = 'LoginError';
-  }
-}
+export const NO_ACCESS_CODE = '尚未設定通關碼，請聯絡管理員';
+export const BAD_ACCESS_CODE = '通關碼失效，請聯絡管理員';
+
+/** Worker 用來判斷「誰能取消哪些品項」；ponytail: 固定字串、猜得到，歸屬以 DB 為準 */
+const ownerKey = (userId?: number): string => (userId === undefined ? 'tg-bot' : `tg-${userId}`);
 
 export interface DinBenDonClientOptions {
-  username: string;
-  password: string;
-  /** 登入失敗後多久內不再打登入端點，預設 30 秒 */
-  cooldownMs?: number;
+  /** 每次請求讀一次，改通關碼立即生效；null 表示尚未設定 */
+  getAccessCode: () => string | null;
   /** 測試用：注入假的 HTTP 處理函式 */
   adapter?: AxiosRequestConfig['adapter'];
 }
 
-type Cfg = InternalAxiosRequestConfig & { _retried?: boolean; _token?: string | null };
-
 export class DinBenDonClient {
   private client: AxiosInstance;
-  private token: string | null = null;
-  private readonly username: string;
-  private readonly password: string;
-  private readonly cooldownMs: number;
-  /** 目前（或進行中）的登入；null 表示尚未登入或需要重登 */
-  private session: Promise<void> | null = null;
-  private reauthing: Promise<void> | null = null;
-  private lastFailure: { at: number; error: LoginError } | null = null;
 
   constructor(options: DinBenDonClientOptions) {
-    this.username = options.username;
-    this.password = options.password;
-    this.cooldownMs = options.cooldownMs ?? 30_000;
     this.client = axios.create({
-      baseURL: API_BASE,
+      baseURL: WORKER_URL,
       timeout: 30000,
-      headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+      headers: { 'Content-Type': 'application/json', Accept: 'application/json', Origin: WEB_ORIGIN },
       adapter: options.adapter,
     });
 
-    this.client.interceptors.request.use((config: Cfg) => {
-      config._token = this.token;
-      if (this.token) config.headers.set('Authorization', `Bearer ${this.token}`);
+    this.client.interceptors.request.use((config: InternalAxiosRequestConfig) => {
+      if (!config.headers.has('X-Access-Code')) {
+        const code = options.getAccessCode();
+        if (!code) throw new Error(NO_ACCESS_CODE);
+        config.headers.set('X-Access-Code', code);
+      }
+      if (!config.headers.has('X-Owner-Key')) config.headers.set('X-Owner-Key', ownerKey());
       return config;
     });
 
-    this.client.interceptors.response.use(
-      (response) => {
-        const newToken = response.headers['x-dbd-new-token'];
-        if (typeof newToken === 'string' && newToken !== '') this.token = newToken;
-        return response;
-      },
-      async (error: unknown) => {
-        const axiosErr = error as { response?: { status?: number }; config?: Cfg };
-        const config = axiosErr.config;
-        if (axiosErr.response?.status === 401 && config && !config._retried) {
-          config._retried = true;
-          // 請求送出後 token 已被別人換新，直接用新 token 重試，不必再登入
-          if (config._token === this.token) await this.reauth();
-          return this.client(config);
-        }
-        return Promise.reject(error);
-      },
-    );
+    this.client.interceptors.response.use(undefined, (error: unknown) => {
+      const res = (error as { response?: { status?: number; data?: { error?: unknown } } }).response;
+      if (res?.status === 401) return Promise.reject(new Error(BAD_ACCESS_CODE));
+      if (typeof res?.data?.error === 'string' && res.data.error) return Promise.reject(new Error(res.data.error));
+      return Promise.reject(error);
+    });
   }
 
-  /** 確保已登入。第一次呼叫才登入；同時多個呼叫共用同一次登入。 */
-  ready(): Promise<void> {
-    if (this.session) return this.session;
-    const failure = this.lastFailure;
-    if (failure && Date.now() - failure.at < this.cooldownMs) return Promise.reject(failure.error);
-
-    const attempt = this.doLogin().then(
-      () => { this.lastFailure = null; },
-      (error: LoginError) => {
-        this.session = null;
-        this.lastFailure = { at: Date.now(), error };
-        throw error;
-      },
-    );
-    this.session = attempt;
-    return attempt;
-  }
-
-  /** token 失效：所有並發的 401 共用同一次重登。 */
-  private reauth(): Promise<void> {
-    if (!this.reauthing) {
-      this.session = null;
-      this.reauthing = this.ready().finally(() => { this.reauthing = null; });
-    }
-    return this.reauthing;
-  }
-
-  private async doLogin(): Promise<void> {
-    console.log('[DinBenDon] Logging in...');
+  /** 用指定通關碼試打一次；碼錯回 false，其他錯誤（網路、Origin 被擋）照丟。 */
+  async verifyAccessCode(code: string): Promise<boolean> {
     try {
-      // _retried：登入請求本身的 401 不要再觸發重登
-      const resp = await this.client.post(
-        '/auth/login',
-        { username: this.username, password: this.password, rememberMe: false, continueUrl: null },
-        { _retried: true } as unknown as AxiosRequestConfig,
-      );
-      const body = resp.data as { data: unknown; error: string | null };
-      if (body.error) throw new Error(body.error);
-      console.log('[DinBenDon] Login successful!');
+      await this.client.get('/order/progress', { headers: { 'X-Access-Code': code } });
+      return true;
     } catch (err) {
-      console.error('[DinBenDon] Login failed:', err instanceof Error ? err.message : err);
-      throw new LoginError(err);
+      if (err instanceof Error && err.message === BAD_ACCESS_CODE) return false;
+      throw err;
     }
   }
 
   async fetchOpenOrders(): Promise<Order[]> {
-    await this.ready();
-
     const resp = await this.client.get('/order/progress');
     const list = resp.data.data as Array<{
       orderHashId: string;
@@ -186,14 +129,12 @@ export class DinBenDonClient {
         shopName: o.shopName,
         deadline: o.expireDate ? formatExpireDate(o.expireDate) : '',
         organizer: o.originator,
-        orderUrl: `https://dinbendon.net/do/order/${o.orderHashId}`,
-        detailUrl: `https://dinbendon.net/do/order/${o.orderHashId}`,
+        orderUrl: `https://w1323wwww-wq.github.io/dinbendon-web/#/order/${o.orderHashId}`,
+        detailUrl: `https://w1323wwww-wq.github.io/dinbendon-web/#/order/${o.orderHashId}`,
       }));
   }
 
   async fetchOrderDetail(order: Order): Promise<OrderDetail> {
-    await this.ready();
-
     const resp = await this.client.post(`/order/${order.id}/get-add-item`, {
       fallbackPlayedBuyerName: null,
     });
@@ -224,62 +165,56 @@ export class DinBenDonClient {
     return { order, categories, shopRevisionNo: data.shop.revisionNo };
   }
 
+  /** 整團的品項（Worker 的 `buyer` 欄位不可靠，歸屬由 Submissions 依 DB 判斷）。 */
   async fetchMyItems(orderHashId: string): Promise<MyOrderItem[]> {
-    await this.ready();
+    const resp = await this.client.get(`/order/${orderHashId}/expand-for-buyer`);
+    const items = (resp.data.data?.items ?? []) as Array<{
+      id: number;
+      buyerName: string;
+      productFullName: string;
+      comment: string | null;
+      price: number;
+      calculatedPrice?: number | null;
+      paid?: boolean;
+      shipped?: boolean;
+    }>;
 
-    const resp = await this.client.get(`/order/${orderHashId}/product-group-for-buyer`, {
-      params: { expand: false },
-    });
-
-    const data = resp.data.data as {
-      rows?: Array<{
-        name?: string;
-        mergedName?: string;
-        mergedKey?: string;
-        items?: Array<{
-          name?: string;
-          mergedName?: string;
-          size?: number;
-          total?: number;
-          comment?: string | null;
-          orderItemIds?: number[];
-          cancelable?: boolean;
-        }>;
-      }>;
-    };
-
-    if (!data.rows) return [];
-
-    return data.rows.flatMap((row) => {
-      const productName = row.name ?? row.mergedName ?? row.mergedKey ?? '';
-      return (row.items ?? []).map((item) => {
-        const qty = item.size ?? 1;
-        const total = item.total ?? 0;
-        return {
-          productName,
-          buyerName: item.name ?? item.mergedName ?? '',
-          qty,
-          price: qty > 0 ? Math.round(total / qty) : 0,
-          comment: item.comment ?? null,
-          orderItemIds: item.orderItemIds ?? [],
-          cancelable: item.cancelable ?? false,
+    // 同人、同品項、同備註、同價合併成一列（跟網頁版一樣）
+    const lines = new Map<string, MyOrderItem>();
+    for (const it of items) {
+      const key = `${it.buyerName}|${it.productFullName}|${it.comment ?? ''}|${it.price}`;
+      let line = lines.get(key);
+      if (!line) {
+        line = {
+          productName: it.productFullName,
+          buyerName: it.buyerName,
+          qty: 0,
+          price: it.calculatedPrice ?? it.price,
+          comment: it.comment || null,
+          orderItemIds: [],
+          cancelable: true,
         };
-      });
-    });
+        lines.set(key, line);
+      }
+      line.qty++;
+      line.orderItemIds.push(it.id);
+      if (it.paid || it.shipped) line.cancelable = false;
+    }
+    return [...lines.values()];
   }
 
-  async cancelItem(orderHashId: string, orderItemIds: number[]): Promise<void> {
-    await this.ready();
-    await this.client.post(`/order/${orderHashId}/cancel-item`, { orderItemIds });
+  async cancelItem(orderHashId: string, orderItemIds: number[], userId?: number): Promise<void> {
+    await this.client.post(`/order/${orderHashId}/cancel-item`, { orderItemIds }, {
+      headers: { 'X-Owner-Key': ownerKey(userId) },
+    });
   }
 
   async submitItem(
     orderDetail: OrderDetail,
     item: { menuItemId: string; productId: string; quantity: number; note?: string },
-    buyerName: string
+    buyerName: string,
+    userId?: number,
   ): Promise<boolean> {
-    await this.ready();
-
     let productName = '';
     let variationName: string | null = null;
     let categoryName: string | null = null;
@@ -321,7 +256,9 @@ export class DinBenDonClient {
 
     console.log('[DinBenDon] submit payload:', JSON.stringify(payload));
 
-    const resp = await this.client.post(`/order/${orderDetail.order.id}/add-item`, payload).catch((e: unknown) => {
+    const resp = await this.client.post(`/order/${orderDetail.order.id}/add-item`, payload, {
+      headers: { 'X-Owner-Key': ownerKey(userId) },
+    }).catch((e: unknown) => {
       const axiosErr = e as { response?: { status?: number; data?: unknown } };
       console.error('[DinBenDon] submit error:', axiosErr.response?.status, JSON.stringify(axiosErr.response?.data));
       throw e;

@@ -1,73 +1,79 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { AxiosError, AxiosResponse, InternalAxiosRequestConfig } from 'axios'
-import { DinBenDonClient, LoginError } from './dinbendon'
+import { BAD_ACCESS_CODE, DinBenDonClient, NO_ACCESS_CODE } from './dinbendon'
 
-function respond(
-  config: InternalAxiosRequestConfig,
-  status: number,
-  data: unknown,
-  headers: Record<string, string> = {},
-): Promise<AxiosResponse> {
-  const response = { data, status, statusText: '', headers, config } as AxiosResponse
+function respond(config: InternalAxiosRequestConfig, status: number, data: unknown): Promise<AxiosResponse> {
+  const response = { data, status, statusText: '', headers: {}, config } as AxiosResponse
   if (status < 300) return Promise.resolve(response)
   return Promise.reject(new AxiosError('fail', AxiosError.ERR_BAD_REQUEST, config, null, response))
 }
 
-/** 假網站：登入換發新 token，只認最新的 token。 */
-function setup(cooldownMs = 30_000) {
-  const server = { valid: '', issued: 0, loginOk: true, logins: 0 }
+/** 假 Worker：只認通關碼 9453，記下每個請求的 headers。 */
+function setup(code: string | null = '9453') {
+  const seen: InternalAxiosRequestConfig[] = []
+  const state = { code }
   const adapter = async (config: InternalAxiosRequestConfig) => {
-    if (config.url === '/auth/login') {
-      server.logins++
-      if (!server.loginOk) return respond(config, 200, { data: null, error: '帳密錯誤' })
-      server.valid = `tok${++server.issued}`
-      return respond(config, 200, { data: {}, error: null }, { 'x-dbd-new-token': server.valid })
+    seen.push(config)
+    if (config.headers.get('X-Access-Code') !== '9453') return respond(config, 401, { error: 'bad code' })
+    if (config.url?.endsWith('/expand-for-buyer')) {
+      return respond(config, 200, {
+        data: {
+          items: [
+            { id: 1, buyerName: 'Mao', productFullName: '蛋餅', comment: null, price: 40 },
+            { id: 2, buyerName: 'Mao', productFullName: '蛋餅', comment: null, price: 40 },
+            { id: 3, buyerName: 'Amy', productFullName: '奶茶', comment: '微糖', price: 25, paid: true },
+          ],
+        },
+      })
     }
-    if (config.headers.get('Authorization') !== `Bearer ${server.valid}`) {
-      return respond(config, 401, {})
-    }
-    return respond(config, 200, { data: [] })
+    if (config.url?.endsWith('/cancel-item')) return respond(config, 400, { error: '已結單' })
+    return respond(config, 200, {
+      data: [
+        { orderHashId: 'abc', shopName: '早餐店', expireDate: null, originator: '週二早餐', inProgress: true },
+        { orderHashId: 'old', shopName: '早餐店', expireDate: null, originator: '週一早餐', inProgress: false },
+      ],
+    })
   }
-  const client = new DinBenDonClient({ username: 'u', password: 'p', cooldownMs, adapter })
-  return { client, server }
+  const client = new DinBenDonClient({ getAccessCode: () => state.code, adapter })
+  return { client, seen, state }
 }
 
-test('延遲登入：建構時不登入，並發呼叫只登入一次', async () => {
-  const { client, server } = setup()
-  assert.equal(server.logins, 0)
-  await Promise.all([client.fetchOpenOrders(), client.fetchOpenOrders()])
-  assert.equal(server.logins, 1)
+test('帶通關碼、Origin、owner key，拆 { data } 並只留開放中的團', async () => {
+  const { client, seen } = setup()
+  const orders = await client.fetchOpenOrders()
+  assert.deepEqual(orders.map((o) => o.id), ['abc'])
+  const h = seen[0].headers
+  assert.equal(h.get('X-Access-Code'), '9453')
+  assert.equal(h.get('Origin'), 'https://w1323wwww-wq.github.io')
+  assert.equal(h.get('X-Owner-Key'), 'tg-bot')
 })
 
-test('token 失效：並發的 401 只重登一次，且各自重試成功', async () => {
-  const { client, server } = setup()
-  await client.fetchOpenOrders()
-  server.valid = 'revoked' // 伺服器端讓 tok1 失效
-  const results = await Promise.all([
-    client.fetchOpenOrders(),
-    client.fetchOpenOrders(),
-    client.fetchOpenOrders(),
-  ])
-  assert.deepEqual(results, [[], [], []])
-  assert.equal(server.logins, 2)
+test('取消帶使用者的 owner key；網站錯誤訊息直接丟出', async () => {
+  const { client, seen } = setup()
+  await assert.rejects(client.cancelItem('abc', [1], 42), /已結單/)
+  assert.equal(seen[0].headers.get('X-Owner-Key'), 'tg-42')
 })
 
-test('登入失敗：丟 LoginError，冷卻期間不再打登入端點，冷卻後恢復', async () => {
-  const { client, server } = setup(50)
-  server.loginOk = false
+test('expand-for-buyer 合併同人同品項，已付款不可取消', async () => {
+  const { client } = setup()
+  const items = await client.fetchMyItems('abc')
+  assert.deepEqual(
+    items.map((i) => [i.buyerName, i.qty, i.orderItemIds, i.cancelable]),
+    [['Mao', 2, [1, 2], true], ['Amy', 1, [3], false]],
+  )
+})
 
-  const first = await client.fetchOpenOrders().catch((e: unknown) => e)
-  assert.ok(first instanceof LoginError)
-  assert.match((first as LoginError).message, /聯絡管理員/)
-  assert.equal(((first as LoginError).detail as Error).message, '帳密錯誤')
-  assert.equal(server.logins, 1)
+test('沒設定通關碼：不打網站；碼錯：回失效訊息', async () => {
+  const { client, seen, state } = setup(null)
+  await assert.rejects(client.fetchOpenOrders(), { message: NO_ACCESS_CODE })
+  assert.equal(seen.length, 0)
+  state.code = '0000'
+  await assert.rejects(client.fetchOpenOrders(), { message: BAD_ACCESS_CODE })
+})
 
-  await assert.rejects(client.fetchOpenOrders(), LoginError)
-  assert.equal(server.logins, 1) // 冷卻中，沒有再登入
-
-  await new Promise((r) => setTimeout(r, 60))
-  server.loginOk = true
-  assert.deepEqual(await client.fetchOpenOrders(), [])
-  assert.equal(server.logins, 2)
+test('verifyAccessCode：用指定的碼試打，不看目前設定', async () => {
+  const { client } = setup(null)
+  assert.equal(await client.verifyAccessCode('9453'), true)
+  assert.equal(await client.verifyAccessCode('0000'), false)
 })

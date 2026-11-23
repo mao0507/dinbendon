@@ -216,6 +216,20 @@ export class BotDatabase {
     `).run(enabled ? '1' : '0');
   }
 
+  getAccessCode(): string | null {
+    const row = this.db.prepare(
+      "SELECT value FROM settings WHERE key = 'access_code'"
+    ).get() as { value: string } | undefined;
+    return row?.value || null;
+  }
+
+  setAccessCode(code: string): void {
+    this.db.prepare(`
+      INSERT INTO settings(key, value) VALUES('access_code', ?)
+      ON CONFLICT(key) DO UPDATE SET value = excluded.value
+    `).run(code);
+  }
+
   // ─── Status ──────────────────────────────────────────────────────────────────
 
   getStatusInfo(): { fileSizeBytes: number; userCount: number; submissionCount: number } {

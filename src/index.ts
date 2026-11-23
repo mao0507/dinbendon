@@ -12,8 +12,6 @@ import { LOG_FILES, LogKind, tailLines, fitTelegram } from './logs'
 
 // ─── Config ───────────────────────────────────────────────────────────────────
 const BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN ?? ''
-const DBD_USERNAME = process.env.DINBENDON_USERNAME ?? ''
-const DBD_PASSWORD = process.env.DINBENDON_PASSWORD ?? ''
 const RAW_ADMIN_USER_ID = process.env.ADMIN_USER_ID?.trim()
 const ADMIN_PORT = process.env.ADMIN_PORT
   ? parseInt(process.env.ADMIN_PORT)
@@ -30,18 +28,11 @@ if (!BOT_TOKEN) {
   console.error('❌ TELEGRAM_BOT_TOKEN is not set!')
   process.exit(1)
 }
-if (!DBD_USERNAME || !DBD_PASSWORD) {
-  console.error('❌ DINBENDON_USERNAME or DINBENDON_PASSWORD is not set!')
-  process.exit(1)
-}
 
 // ─── Singletons ───────────────────────────────────────────────────────────────
 const bot = new TelegramBot(BOT_TOKEN, { polling: true })
-const dbdClient = new DinBenDonClient({
-  username: DBD_USERNAME,
-  password: DBD_PASSWORD,
-})
 const botDb = new BotDatabase(undefined, WHITELIST_DEFAULT)
+const dbdClient = new DinBenDonClient({ getAccessCode: () => botDb.getAccessCode() })
 const access = new Access({ db: botDb, adminUserId: ADMIN_USER_ID })
 const flow = new OrderFlow({
   client: dbdClient,
@@ -61,6 +52,7 @@ const ADMIN_COMMANDS: TelegramBot.BotCommand[] = [
   { command: 'users', description: '列出使用者（管理員）' },
   { command: 'add_user', description: '授權使用者 <userId>（管理員）' },
   { command: 'revoke_user', description: '撤銷授權 <userId>（管理員）' },
+  { command: 'set_code', description: '設定點餐通關碼 <碼>（管理員）' },
   { command: 'log', description: '查看 log [error|out] [行數]（管理員）' },
 ]
 bot.setMyCommands(USER_COMMANDS).catch((err) => console.error('[menu] setMyCommands failed:', err))
@@ -231,6 +223,32 @@ bot.onText(/\/revoke_user(?:\s+(-?\d+))?/, async (msg, match) => {
 })
 
 // ─── Admin: /users ────────────────────────────────────────────────────────────
+bot.onText(/\/set_code(?:\s+(\S+))?/, async (msg, match) => {
+  const chatId = msg.chat.id
+  const userId = msg.from?.id ?? chatId
+  if (!(await requireAdmin(chatId, userId))) return
+  const code = match?.[1]
+  if (!code) {
+    await reply(chatId, '用法：`/set_code <通關碼>`')
+    return
+  }
+  // 先試打一次，打得通才存
+  let ok: boolean
+  try {
+    ok = await dbdClient.verifyAccessCode(code)
+  } catch (err) {
+    const reason = err instanceof Error ? err.message : String(err)
+    await reply(chatId, `⚠️ 無法驗證通關碼：${escapeMarkdown(reason)}`)
+    return
+  }
+  if (!ok) {
+    await reply(chatId, '❌ 通關碼錯誤，未儲存。')
+    return
+  }
+  botDb.setAccessCode(code)
+  await reply(chatId, '✅ 通關碼已更新。')
+})
+
 bot.onText(/\/users/, async (msg) => {
   const chatId = msg.chat.id
   const userId = msg.from?.id ?? chatId
@@ -312,8 +330,7 @@ bot.on('message', async (msg) => {
 // ─── Start ────────────────────────────────────────────────────────────────────
 console.log('🤖 DinBenDon Telegram Bot starting...')
 console.log(`📡 Connected to: ${BOT_TOKEN.slice(0, 10)}...`)
-// 暖機：帳密有問題重啟當下就能在 log 看到；失敗不影響啟動，之後依需求再登入
-dbdClient.ready().catch(() => {})
+if (!botDb.getAccessCode()) console.warn('⚠️ 尚未設定通關碼，管理員請用 /set_code <碼> 設定')
 
 startAdminServer(botDb, ADMIN_PORT)
 console.log('✅ Bot is running. Press Ctrl+C to stop.')

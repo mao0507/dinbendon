@@ -80,9 +80,9 @@ Credentials live in `.env.local` (not `.env`). Required vars:
 
 ```
 TELEGRAM_BOT_TOKEN=
-DINBENDON_USERNAME=
-DINBENDON_PASSWORD=
 ```
+
+點餐通關碼不放 env：存在 DB `settings.access_code`，管理員用 Telegram `/set_code <碼>` 設定（先試打 `/order/progress` 驗證，通過才存）。未設定時點餐會回「尚未設定通關碼，請聯絡管理員」。
 
 Optional vars:
 
@@ -103,7 +103,7 @@ src/
 ├── index.ts       — Telegram adapter: registers handlers, auth/login, owns singletons
 ├── access.ts      — Access: isAdmin / isAllowed（白名單開關 + 管理員 bypass + 授權狀態）
 ├── submissions.ts — Submissions: place / mine / cancel 品項，維護 order_item_id 歸屬（依賴 client + db）
-├── dinbendon.ts   — axios client for dinbendon.net JSON API (bearer token, auto re-login on 401)
+├── dinbendon.ts   — axios client for 新點餐網站的 Cloudflare Worker（代打 dinbendon.net API，通關碼驗證）
 ├── order-flow/    — 點餐流程 module（唯一對外入口 index.ts）
 │   ├── index.ts       — OrderFlow.handle(userId, input, ui)、送單邏輯
 │   ├── session.ts     — Per-user state machine (Map<userId, UserSession>)，module 內部
@@ -120,7 +120,7 @@ SQLite DB is written to `data/bot.db` (created on first run).
 1. `index.ts` owns one `DinBenDonClient`, one `BotDatabase`, one `Submissions({ client, db })`, and one `OrderFlow({ client, submissions })`.
 2. `index.ts` 透過 `Access` 判斷放行（`ensureAuth`、`requireAdmin`），並處理 `/help`, `/version`, admin commands. 點餐相關輸入一律轉成 `FlowInput`（`callback` / `text` / `command: orders|cancel|reset`）交給 `OrderFlow.handle(userId, input, ui)`。
 3. `ui` 是 Telegram adapter（`makeUi`）：`ui.show(text, keyboard)` 第一次呼叫對 callback 是編輯按鈕所在訊息、對 command/text 是新送一則，之後都編輯同一則。
-4. `DinBenDonClient` holds a single bearer token — login is global, not per-user.
+4. `DinBenDonClient` 沒有登入狀態；通關碼每次從 DB 讀，改了立即生效。
 5. 送單走 `Submissions.place`（不丟例外，失敗回 `{ ok:false, reason }`）：
    - 送出前先快照 `fetchMyItems`，快照失敗就中止；
    - 送出後 diff 新增 id，且只記 `buyerName` 等於輸入姓名的品項（姓名對不上時退回全部新增 id 並 `console.warn`）；
@@ -129,14 +129,13 @@ SQLite DB is written to `data/bot.db` (created on first run).
 
 ### DinBenDon client (`dinbendon.ts`)
 
-- Target: JSON REST API (`API_BASE` in `dinbendon.ts`), not HTML scraping. Auth = `Bearer` token from `POST /auth/login`.
-- `new DinBenDonClient({ username, password })`：帳密在建構時傳入；**延遲登入**，每個 `fetch*`／`submitItem`／`cancelItem` 開頭 `await this.ready()`，並發呼叫共用同一次登入（single-flight）。`index.ts` 啟動時只做暖機 `ready().catch(...)`。
-- Axios request interceptor attaches token; response interceptor adopts rotated token from `x-dbd-new-token` header.
-- On 401：所有並發的 401 共用同一次重登（`reauth()`），完成後各自重試原請求一次（`_retried`）；若請求送出後 token 已被換新則直接重試不再登入。
-- 登入失敗丟 `LoginError`：`message` 是給使用者看的固定文字（請稍後再試／聯絡管理員），網站原始錯誤在 `detail` 並寫 log。失敗後 30 秒（`cooldownMs`）內不再打登入端點，直接丟同一個 `LoginError`。
-- Login is global (one token for the whole bot), not per Telegram user.
+- Target: 新點餐網站 `https://w1323wwww-wq.github.io/dinbendon-web/#/` 背後的 Cloudflare Worker（`WORKER_URL`），Worker 用群組帳號 JWT 代打 dinbendon.net API，路徑相同、回應包在 `{ data, error }`。舊版直連 dinbendon.net（帳密登入）保留在 `legacy-dinbendon-api` 分支。
+- `new DinBenDonClient({ getAccessCode })`：每個請求讀一次通關碼（來自 `BotDatabase.getAccessCode()`），沒有就直接丟 `NO_ACCESS_CODE`，不打網站。
+- 每個請求帶 `X-Access-Code`、`Origin: https://w1323wwww-wq.github.io`（Worker 會擋其他 Origin，回 `403 forbidden origin`）、`X-Owner-Key`（`tg-<userId>`，`submitItem`／`cancelItem` 傳 userId，其他用 `tg-bot`）。
+- 401 → 丟 `BAD_ACCESS_CODE`（通關碼失效）；回應有 `error` 字串 → 以該字串丟 `Error`。`verifyAccessCode(code)` 用指定碼試打，碼錯回 false。
+- Worker 的 `buyer` 欄位不可靠（任何 owner key 都回 true），品項歸屬一律以 DB（`Submissions`）為準。
 - 測試：`src/dinbendon.test.ts` 以 axios `adapter` 選項注入假 HTTP（`DinBenDonClientOptions.adapter`）。
-- Endpoints: `/order/progress`, `/order/:id/get-add-item`, `/order/:id/add-item`, `/order/:hash/product-group-for-buyer`, `/order/:hash/cancel-item`.
+- Endpoints: `/order/progress`, `/order/:hash/get-add-item`, `/order/:hash/add-item`, `/order/:hash/expand-for-buyer`（整團品項，client 依 人|品項|備註|價格 合併）, `/order/:hash/cancel-item`.
 
 ### Session state machine (`BotStep`, `order-flow/session.ts`)
 
@@ -176,7 +175,7 @@ All text sent to Telegram uses `parse_mode: 'MarkdownV2'`. Every user-facing str
 - Express server binds to `127.0.0.1` only (never exposed externally)
 - REST API: `GET/POST /api/users`, `POST /api/users/:userId/authorize`, `POST /api/users/:userId/revoke`, `GET/POST /api/settings`, `GET /api/submissions`, `GET /api/status` (uptime, memory, SQLite info, `pm2 jlist` for `dinbendon-bot`)
 - Static admin UI served from `public/`
-- Telegram admin commands (`/add_user`, `/revoke_user`, `/users`) require `ADMIN_USER_ID` to be set
+- Telegram admin commands (`/add_user`, `/revoke_user`, `/users`, `/set_code`, `/log`) require `ADMIN_USER_ID` to be set
 - `/version` replies with `git rev-parse --short=7 HEAD` (runs in `__dirname`, i.e. `dist/`)
 
 ### Whitelist

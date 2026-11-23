@@ -57,6 +57,7 @@ export class Submissions {
           note: item.note,
         },
         buyerName,
+        userId,
       )
       if (!accepted) return { ok: false, reason: '網站拒絕送出，請至網頁確認' }
     } catch (err) {
@@ -116,7 +117,7 @@ export class Submissions {
     const myIds = db.getMyItemIds(userId, orderId)
     const own = ids.filter((id) => myIds.has(id))
     if (own.length === 0) return { ok: false, reason: '找不到可取消的品項' }
-    await client.cancelItem(orderId, own)
+    await client.cancelItem(orderId, own, userId)
     db.recordCancellation(own)
     return { ok: true, ...(await this.mine(userId, orderId)) }
   }
